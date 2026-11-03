@@ -1,0 +1,1737 @@
+// dlopen and friends are a Unix API; the host build on Windows has no chain.
+#[cfg(unix)]
+mod chain;
+#[cfg(unix)]
+mod chain_jni;
+mod tun;
+
+use std::collections::VecDeque;
+use std::net::SocketAddr;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+
+use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
+use jni::sys::{jboolean, jint, jobjectArray, jstring, JNI_FALSE, JNI_TRUE};
+use jni::{JNIEnv, JavaVM};
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
+use serde::Deserialize;
+use serde_json::json;
+use tokio::sync::{mpsc, oneshot};
+
+const BRIDGE_VERSION: &str = "0.3.1";
+const PACKET_QUEUE: usize = 1_024;
+const SCAN_RESULT_LIMIT: usize = 12;
+// Android coroutine/JNI callers can have only a small native stack. Both the
+// root future and Tokio tasks need room for the engine's async call chains.
+const CORE_STACK_BYTES: usize = 8 << 20;
+
+#[derive(Default)]
+struct RunControl {
+    active: bool,
+    stop: Option<oneshot::Sender<()>>,
+}
+
+static RUN_CONTROL: Lazy<Mutex<RunControl>> = Lazy::new(|| Mutex::new(RunControl::default()));
+
+/// Cancellation leaves the slot occupied until the owning native call unwinds.
+struct EngineRunGuard {
+    receiver: Option<oneshot::Receiver<()>>,
+}
+
+impl EngineRunGuard {
+    fn acquire() -> Result<Self, String> {
+        let mut control = RUN_CONTROL.lock();
+        if control.active {
+            return Err("engine is already running".into());
+        }
+        let (sender, receiver) = oneshot::channel();
+        control.active = true;
+        control.stop = Some(sender);
+        Ok(Self {
+            receiver: Some(receiver),
+        })
+    }
+}
+
+impl Drop for EngineRunGuard {
+    fn drop(&mut self) {
+        let mut control = RUN_CONTROL.lock();
+        control.stop.take();
+        control.active = false;
+    }
+}
+
+/// A descriptor detached by Android remains ours until the pump consumes it.
+struct PendingTunDescriptor(Option<i32>);
+
+impl Drop for PendingTunDescriptor {
+    fn drop(&mut self) {
+        if let Some(fd) = self.0.take() {
+            unsafe {
+                libc::close(fd);
+            }
+        }
+    }
+}
+static SCAN_RUNNING: AtomicBool = AtomicBool::new(false);
+static SCAN_CANCELLED: AtomicBool = AtomicBool::new(false);
+static SCAN_PROGRESS: Lazy<Mutex<(u64, aether::scan::ScanProgress)>> =
+    Lazy::new(|| Mutex::new((0, aether::scan::ScanProgress::default())));
+static PREPARE_RUNNING: AtomicBool = AtomicBool::new(false);
+static PREPARE_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+/// How often a cancelled preparation notices it was cancelled.
+const CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+struct ScanRunningGuard;
+
+impl Drop for ScanRunningGuard {
+    fn drop(&mut self) {
+        SCAN_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
+struct PrepareRunningGuard;
+
+impl Drop for PrepareRunningGuard {
+    fn drop(&mut self) {
+        PREPARE_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Completes once `flag` is set.
+///
+/// The flag rather than a channel because the setter is a JNI call from another
+/// thread with no runtime of its own, and polling it every tenth of a second
+/// costs nothing next to what it interrupts.
+async fn until_cancelled(flag: &AtomicBool) {
+    loop {
+        if flag.load(Ordering::Relaxed) {
+            return;
+        }
+        tokio::time::sleep(CANCEL_POLL).await;
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeConfig {
+    mode: String,
+    config_path: String,
+    #[serde(default = "default_proxy_port")]
+    listen_port: u16,
+    /// Offer the proxy to the local network instead of this device only.
+    #[serde(default)]
+    lan_sharing: bool,
+    /// Demanded of every client when both are set. Empty means no password,
+    /// which the settings screen presents as the choice it is.
+    #[serde(default)]
+    lan_username: String,
+    #[serde(default)]
+    lan_password: String,
+    /// Seconds between WireGuard keepalives, or 0 for the engine's own default.
+    ///
+    /// Worth exposing because the engine's default is 5, which is far below the
+    /// 25 WireGuard itself recommends, and on a phone every one of those wakes
+    /// the radio.
+    #[serde(default)]
+    wg_keepalive: u16,
+    /// A proxy already running on this device to dial out through.
+    #[serde(default)]
+    upstream_proxy: String,
+    /// Resolvers to use inside the tunnel. Empty leaves the engine's own.
+    #[serde(default)]
+    dns_servers: String,
+    /// Read the hostname from a flow's first bytes so domain rules can match.
+    #[serde(default = "default_true")]
+    route_sniff: bool,
+    /// Destinations to refuse, one per line.
+    #[serde(default)]
+    route_block: String,
+    /// Destinations to reach without the tunnel.
+    #[serde(default)]
+    route_direct: String,
+    /// Register a fresh identity when Cloudflare refuses the saved one.
+    #[serde(default = "default_true")]
+    auto_reprovision: bool,
+    /// One of error, warn, info, debug, trace. Empty leaves the default.
+    #[serde(default)]
+    log_level: String,
+    /// TLS key groups, which change the shape of the handshake.
+    #[serde(default)]
+    tls_groups: String,
+    #[serde(default)]
+    tls_ciphers: String,
+    #[serde(default)]
+    disable_grease: bool,
+    #[serde(default)]
+    ech_dns: String,
+    #[serde(default)]
+    ech_domain: String,
+    #[serde(default)]
+    enroll_address: String,
+    #[serde(default)]
+    masque_sni: String,
+    #[serde(default)]
+    api_host: String,
+    #[serde(default)]
+    api_sni: String,
+    #[serde(default)]
+    tls13_ciphers: String,
+    #[serde(default)]
+    tls_key_shares: String,
+    #[serde(default)]
+    tls_sigalgs: String,
+    #[serde(default)]
+    tls_cert_compression: String,
+    #[serde(default)]
+    tls_alps: String,
+    #[serde(default)]
+    tls_trust_anchors: String,
+    #[serde(default)]
+    tls_server_padding: String,
+    #[serde(default)]
+    enable_grease_sigalgs: bool,
+    #[serde(default)]
+    enable_ech_grease: bool,
+    #[serde(default)]
+    disable_ocsp_stapling: bool,
+    #[serde(default)]
+    disable_sct: bool,
+    #[serde(default)]
+    disable_session_ticket: bool,
+    #[serde(default)]
+    disable_extension_permutation: bool,
+
+    peer: Option<String>,
+    #[serde(default)]
+    peer_fallback: bool,
+    #[serde(default = "default_scan_mode")]
+    scan_mode: String,
+    /// Discovery passes have their own bound, including enrollment and ECH.
+    #[serde(default)]
+    scan_budget_millis: Option<u64>,
+    #[serde(default)]
+    scan_id: u64,
+    #[serde(default = "default_ip_scan")]
+    ip_scan: String,
+    #[serde(default = "default_transport")]
+    transport: String,
+    #[serde(default = "default_noize")]
+    noize: String,
+    #[serde(default = "default_true")]
+    validation_enabled: bool,
+    /// Split the TLS ClientHello across several small writes on the HTTP/2
+    /// transport. Deep packet inspection that blocks on the SNI generally reads
+    /// only the first segment, so splitting it is what gets a handshake through
+    /// networks that filter by hostname.
+    #[serde(default)]
+    fragment_tls: bool,
+    /// Encrypted Client Hello. Hides the SNI outright where the upstream
+    /// supports it.
+    #[serde(default)]
+    encrypted_hello: bool,
+    #[serde(default)]
+    hello_shape: String,
+    #[serde(default)]
+    fragment_size: String,
+    #[serde(default)]
+    fragment_delay: String,
+    #[serde(default = "default_true")]
+    fragment_sni: bool,
+    #[serde(default)]
+    ech_config_list: String,
+    #[serde(default)]
+    custom_ech: bool,
+    /// Bounded discovery on an automatic recovery rung; manual scans keep their budgets.
+    #[serde(default)]
+    fast_connect: bool,
+}
+
+fn default_proxy_port() -> u16 {
+    1819
+}
+
+fn validate_fragment_range(
+    raw: &str,
+    minimum: u64,
+    maximum: u64,
+    name: &str,
+) -> Result<(), String> {
+    if raw.is_empty() {
+        return Ok(());
+    }
+    let values: Vec<_> = raw.trim().split('-').collect();
+    let low = values.first().and_then(|v| v.parse::<u64>().ok());
+    let high = values.last().and_then(|v| v.parse::<u64>().ok());
+    match (low, high) {
+        (Some(low), Some(high))
+            if values.len() <= 2 && low >= minimum && high >= low && high <= maximum =>
+        {
+            Ok(())
+        }
+        _ => Err(format!(
+            "{name} must be a value or ascending range within {minimum}..{maximum}"
+        )),
+    }
+}
+
+fn valid_ech_list(bytes: &[u8]) -> bool {
+    if bytes.len() < 7
+        || bytes.len() > 65537
+        || usize::from(u16::from_be_bytes([bytes[0], bytes[1]])) != bytes.len() - 2
+    {
+        return false;
+    }
+    let mut offset = 2;
+    while offset < bytes.len() {
+        let Some(header) = bytes.get(offset..offset + 4) else {
+            return false;
+        };
+        let len = usize::from(u16::from_be_bytes([header[2], header[3]]));
+        if len == 0 {
+            return false;
+        }
+        offset += 4 + len;
+    }
+    offset == bytes.len()
+}
+
+fn default_scan_mode() -> String {
+    "balanced".into()
+}
+
+fn default_ip_scan() -> String {
+    "both".into()
+}
+
+fn default_transport() -> String {
+    "h2".into()
+}
+
+fn default_noize() -> String {
+    "firewall".into()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl BridgeConfig {
+    fn parse(raw: &str) -> Result<Self, String> {
+        let config: Self = serde_json::from_str(raw).map_err(|error| error.to_string())?;
+        if !matches!(config.mode.as_str(), "proxy" | "tun") {
+            return Err("mode must be proxy or tun".into());
+        }
+        if config.config_path.trim().is_empty() {
+            return Err("configPath is required".into());
+        }
+        if !(1_024..=65_535).contains(&config.listen_port) {
+            return Err("listenPort must be between 1024 and 65535".into());
+        }
+        // A half-filled pair would silently become no password at all, which
+        // is the opposite of what someone typing a username is asking for.
+        if config.lan_username.is_empty() != config.lan_password.is_empty() {
+            return Err("lanUsername and lanPassword must both be set, or neither".into());
+        }
+        // 0 means the engine's default. Above 300 the mapping most NATs hold
+        // has long since expired, so the tunnel would sit dead between packets.
+        if config.wg_keepalive > 300 {
+            return Err("wgKeepalive must be 300 seconds or less".into());
+        }
+        if !config.log_level.is_empty()
+            && !matches!(
+                config.log_level.as_str(),
+                "error" | "warn" | "info" | "debug" | "trace"
+            )
+        {
+            return Err("logLevel must be error, warn, info, debug or trace".into());
+        }
+        // "auto" never arrives: the service resolves it to a real framing
+        // before it builds this config, so a rung of the ladder is what reaches
+        // here. Keep this list and the one in embedded() together -- one
+        // naming a transport the other does not is how a control the app offers
+        // becomes a tunnel the engine will not build.
+        if !matches!(
+            config.transport.as_str(),
+            "h3" | "h2" | "wg" | "wiw" | "mim" | "wom"
+        ) {
+            return Err("transport must be h3, h2, wg, wiw, mim or wom".into());
+        }
+        if !matches!(config.hello_shape.as_str(), "" | "records" | "compact") {
+            return Err("helloShape must be empty, records or compact".into());
+        }
+        if config.fragment_tls {
+            validate_fragment_range(&config.fragment_size, 1, 16384, "fragmentSize")?;
+            validate_fragment_range(&config.fragment_delay, 0, 100, "fragmentDelay")?;
+        }
+        if config.encrypted_hello && (config.custom_ech || !config.ech_config_list.is_empty()) {
+            let bytes = aether::tls::decode_ech_config_list(&config.ech_config_list)
+                .map_err(|_| "echConfigList must be a Base64 ECHConfigList".to_string())?;
+            if !valid_ech_list(&bytes) {
+                return Err("echConfigList has an invalid ECHConfigList length".into());
+            }
+        }
+        if config.encrypted_hello {
+            if !config.ech_dns.trim().is_empty() {
+                aether::dns::EchDns::parse(config.ech_dns.trim())
+                    .map_err(|reason| format!("echDns: {reason}"))?;
+            }
+            if !config.ech_domain.trim().is_empty()
+                && !aether::dns::valid_domain(config.ech_domain.trim())
+            {
+                return Err("echDomain must be a DNS name".into());
+            }
+        }
+        if !config.enroll_address.trim().is_empty()
+            && aether::dns::host_and_port(config.enroll_address.trim(), 443).is_none()
+        {
+            return Err("enrollAddress must be an IP address or host with an optional port".into());
+        }
+        for (name, value) in [
+            ("masqueSni", &config.masque_sni),
+            ("apiHost", &config.api_host),
+            ("apiSni", &config.api_sni),
+            ("tls13Ciphers", &config.tls13_ciphers),
+            ("tlsKeyShares", &config.tls_key_shares),
+            ("tlsSigalgs", &config.tls_sigalgs),
+            ("tlsCertCompression", &config.tls_cert_compression),
+            ("tlsAlps", &config.tls_alps),
+            ("tlsTrustAnchors", &config.tls_trust_anchors),
+            ("tlsServerPadding", &config.tls_server_padding),
+        ] {
+            if value.len() > 4096 || value.chars().any(char::is_control) {
+                return Err(format!("{name} contains an invalid value"));
+            }
+        }
+        for (name, value) in [
+            ("masqueSni", &config.masque_sni),
+            ("apiHost", &config.api_host),
+            ("apiSni", &config.api_sni),
+        ] {
+            let value = value.trim().trim_end_matches('.');
+            if !value.is_empty()
+                && (!aether::dns::valid_domain(value) || value.parse::<std::net::IpAddr>().is_ok())
+            {
+                return Err(format!("{name} must be a domain name"));
+            }
+        }
+        if let Some(peer) = config.peer.as_deref() {
+            let address = peer
+                .parse::<SocketAddr>()
+                .map_err(|_| "peer must be an IP:port address".to_string())?;
+            if address.port() == 0 {
+                return Err("peer port must be between 1 and 65535".into());
+            }
+        } else if config.peer_fallback {
+            return Err("peerFallback requires a custom peer".into());
+        }
+        Ok(config)
+    }
+
+    fn embedded(
+        &self,
+        prepared_peer: Option<SocketAddr>,
+    ) -> Result<aether::EmbeddedConfig, String> {
+        let peer = match prepared_peer {
+            Some(peer) => Some(peer),
+            None => self
+                .peer
+                .as_deref()
+                .map(str::parse)
+                .transpose()
+                .map_err(|_| "peer must be an IP:port address".to_string())?,
+        };
+        Ok(aether::EmbeddedConfig {
+            config_path: self.config_path.clone(),
+            // Unspecified rather than a chosen interface: the phone's address
+            // on the local network changes with the network, and binding the
+            // one it had at connect time would stop answering after a roam.
+            listen: if self.lan_sharing {
+                SocketAddr::from(([0, 0, 0, 0], self.listen_port))
+            } else {
+                SocketAddr::from(([127, 0, 0, 1], self.listen_port))
+            },
+            access: self.access(),
+            peer,
+            peer_fallback: self.peer_fallback,
+            scan_mode: self.scan_mode.clone(),
+            ip_scan: self.ip_scan.clone(),
+            // h2 and h3 are two framings of one protocol, chosen by an
+            // environment variable; the rest are different tunnels entirely,
+            // each with its own account, endpoints and prober.
+            //
+            // Named one by one rather than falling through to MASQUE. A
+            // catch-all here is how a protocol the engine gained arrives as a
+            // single MASQUE hop with nothing to show it did: the app offers a
+            // control, the user picks it, the engine builds something else, and
+            // every layer reports success. parse() has already rejected
+            // anything not in this list, so the last arm is unreachable -- it is
+            // here so that adding a transport to one list and not the other
+            // fails loudly instead of silently.
+            protocol: match self.transport.as_str() {
+                "h2" | "h3" => "masque".into(),
+                "wg" => "wireguard".into(),
+                "wiw" => "warp-in-warp".into(),
+                "mim" => "masque-in-masque".into(),
+                "wom" => "wg-over-masque".into(),
+                other => {
+                    return Err(format!(
+                        "this build accepts the transport '{other}' but does not know \
+                         which tunnel it means"
+                    ))
+                }
+            },
+        })
+    }
+
+    /// Credentials only mean anything to a client that is not this device.
+    ///
+    /// Kept out of the loopback case deliberately: a password there guards
+    /// nothing, and would break every local client that has none configured.
+    fn access(&self) -> aether::socks::Access {
+        let credentials = if self.lan_sharing && !self.lan_username.is_empty() {
+            Some(aether::socks::Credentials {
+                username: self.lan_username.clone(),
+                password: self.lan_password.clone(),
+            })
+        } else {
+            None
+        };
+        aether::socks::Access { credentials }
+    }
+
+    fn apply_environment(&self) {
+        fn set_or_clear(name: &str, value: &str) {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                std::env::remove_var(name);
+            } else {
+                std::env::set_var(name, trimmed);
+            }
+        }
+
+        std::env::set_var("AETHER_NOIZE", &self.noize);
+        if self.transport == "h2" || self.transport == "wom" {
+            std::env::set_var("AETHER_MASQUE_HTTP2", "1");
+        } else {
+            std::env::remove_var("AETHER_MASQUE_HTTP2");
+        }
+        // WireGuard reads its obfuscation from the same AETHER_NOIZE set above,
+        // but the profile names differ in meaning between the two tunnels, so
+        // the engine resolves candidates itself rather than trusting one name.
+
+        std::env::set_var("AETHER_QUICK_RECONNECT", "1");
+        set_or_clear("AETHER_HELLO_SHAPE", &self.hello_shape);
+        set_or_clear("AETHER_MASQUE_H2_FRAGMENT_SIZE", &self.fragment_size);
+        set_or_clear("AETHER_MASQUE_H2_FRAGMENT_DELAY", &self.fragment_delay);
+        std::env::set_var(
+            "AETHER_MASQUE_H2_FRAGMENT_SNI",
+            if self.fragment_sni { "1" } else { "0" },
+        );
+        if self.fast_connect {
+            std::env::set_var("AETHER_CONNECT_FAST", "1");
+        } else {
+            std::env::remove_var("AETHER_CONNECT_FAST");
+        }
+        if self.fragment_tls {
+            std::env::set_var("AETHER_MASQUE_H2_FRAGMENT", "1");
+        } else {
+            std::env::remove_var("AETHER_MASQUE_H2_FRAGMENT");
+        }
+        if self.encrypted_hello {
+            std::env::set_var(
+                "AETHER_ECH",
+                if self.ech_config_list.is_empty() {
+                    "auto"
+                } else {
+                    &self.ech_config_list
+                },
+            );
+        } else {
+            std::env::remove_var("AETHER_ECH");
+        }
+        if self.validation_enabled {
+            std::env::remove_var("AETHER_MASQUE_NO_DATA_CHECK");
+        } else {
+            std::env::set_var("AETHER_MASQUE_NO_DATA_CHECK", "1");
+        }
+
+        // Everything below was already read by the engine and never set by this
+        // app, so the features existed in the shipped binary with no way to
+        // reach them.
+
+        // Zero means "say nothing and let the engine choose", which keeps the
+        // one default in the engine rather than copying it here to drift.
+        if self.wg_keepalive > 0 {
+            std::env::set_var("AETHER_WG_KEEPALIVE", self.wg_keepalive.to_string());
+        } else {
+            std::env::remove_var("AETHER_WG_KEEPALIVE");
+        }
+
+        // Through the environment rather than an argument: any app on the phone
+        // can read /proc/<pid>/cmdline, and this string can carry a password.
+        set_or_clear("AETHER_UPSTREAM", &self.upstream_proxy);
+        set_or_clear("AETHER_DNS", &self.dns_servers);
+        set_or_clear("AETHER_TLS_GROUPS", &self.tls_groups);
+        set_or_clear("AETHER_TLS_CIPHERS", &self.tls_ciphers);
+        set_or_clear(
+            "AETHER_DISABLE_GREASE",
+            if self.disable_grease { "1" } else { "" },
+        );
+        set_or_clear(
+            "AETHER_ECH_DNS",
+            if self.encrypted_hello {
+                if self.ech_dns.trim().is_empty() {
+                    // H2 is also used where UDP, including DNS on port 53,
+                    // cannot leave. Bootstrap its key over protected HTTPS.
+                    "https://1.1.1.1/dns-query"
+                } else {
+                    &self.ech_dns
+                }
+            } else {
+                // Automatic enrollment races ECH even when tunnel ECH is off.
+                "https://1.1.1.1/dns-query"
+            },
+        );
+        set_or_clear(
+            "AETHER_ECH_DOMAIN",
+            if self.encrypted_hello {
+                &self.ech_domain
+            } else {
+                ""
+            },
+        );
+        // Saved enrollAddress values keep working with the renamed upstream setting.
+        set_or_clear("AETHER_API_ADDRESS", &self.enroll_address);
+        std::env::remove_var("AETHER_ENROLL_ADDRESS");
+        set_or_clear("AETHER_MASQUE_SNI", &self.masque_sni);
+        set_or_clear("AETHER_API_HOST", &self.api_host);
+        set_or_clear("AETHER_API_SNI", &self.api_sni);
+        set_or_clear("AETHER_TLS13_CIPHERS", &self.tls13_ciphers);
+        set_or_clear("AETHER_TLS_KEY_SHARES", &self.tls_key_shares);
+        set_or_clear("AETHER_TLS_SIGALGS", &self.tls_sigalgs);
+        set_or_clear("AETHER_TLS_CERT_COMPRESSION", &self.tls_cert_compression);
+        set_or_clear("AETHER_TLS_ALPS", &self.tls_alps);
+        set_or_clear("AETHER_TLS_TRUST_ANCHORS", &self.tls_trust_anchors);
+        set_or_clear("AETHER_TLS_SERVER_PADDING", &self.tls_server_padding);
+        set_or_clear(
+            "AETHER_ENABLE_GREASE_SIGALGS",
+            if self.enable_grease_sigalgs { "1" } else { "" },
+        );
+        set_or_clear(
+            "AETHER_ENABLE_ECH_GREASE",
+            if self.enable_ech_grease { "1" } else { "" },
+        );
+        set_or_clear(
+            "AETHER_DISABLE_OCSP_STAPLING",
+            if self.disable_ocsp_stapling { "1" } else { "" },
+        );
+        set_or_clear(
+            "AETHER_DISABLE_SCT",
+            if self.disable_sct { "1" } else { "" },
+        );
+        set_or_clear(
+            "AETHER_DISABLE_SESSION_TICKET",
+            if self.disable_session_ticket { "1" } else { "" },
+        );
+        set_or_clear(
+            "AETHER_DISABLE_EXTENSION_PERMUTATION",
+            if self.disable_extension_permutation {
+                "1"
+            } else {
+                ""
+            },
+        );
+        aether::account::forget_answered_api_host();
+        aether::account::forget_api_ech();
+        set_or_clear("AETHER_ROUTE_BLOCK", &self.route_block);
+        set_or_clear("AETHER_ROUTE_DIRECT", &self.route_direct);
+        set_or_clear("AETHER_LOG_LEVEL", &self.log_level);
+        apply_log_level(&self.log_level);
+
+        // Both default to on in the engine and are switched off by the literal
+        // "0", so the variable is only worth setting to turn one off.
+        if self.route_sniff {
+            std::env::remove_var("AETHER_ROUTE_SNIFF");
+        } else {
+            std::env::set_var("AETHER_ROUTE_SNIFF", "0");
+        }
+        if self.auto_reprovision {
+            std::env::remove_var("AETHER_REPROVISION");
+        } else {
+            std::env::set_var("AETHER_REPROVISION", "0");
+        }
+    }
+}
+
+/// Recent lines from the engine, newest last.
+///
+/// The engine explains itself through `log` -- which endpoint it is testing,
+/// which obfuscation profile answered, why a handshake failed. Sending that only
+/// to logcat means it is unreachable from a phone the developer does not hold,
+/// so a user reporting "it will not connect" has nothing to send that says why.
+/// Buffered here and drained into the app's diagnostics instead.
+static ENGINE_LOG: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+
+/// Enough for a whole connect attempt including a full endpoint scan, and
+/// bounded because nothing guarantees anybody is draining.
+const MAX_ENGINE_LOG: usize = 400;
+
+/// Writes each line to logcat and keeps a copy the app can read.
+///
+/// One logger, because `log` has room for exactly one. Delegating the logcat
+/// half keeps `adb logcat -s aether` working exactly as before.
+struct TeeLogger(android_logger::AndroidLogger);
+
+impl log::Log for TeeLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        self.0.enabled(metadata)
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        self.0.log(record);
+        if !self.0.enabled(record.metadata()) {
+            return;
+        }
+        let line = format!("{}: {}", record.target(), record.args());
+        let mut buffer = ENGINE_LOG.lock();
+        if buffer.len() >= MAX_ENGINE_LOG {
+            buffer.pop_front();
+        }
+        buffer.push_back(line);
+    }
+
+    fn flush(&self) {
+        self.0.flush();
+    }
+}
+
+/// Sends the engine's own log to logcat and to the app, once.
+///
+/// The engine reports what it is doing through the `log` crate -- which endpoint
+/// it is testing, which obfuscation profile answered, why a handshake failed.
+/// On Android nothing consumes that by default, so all of it was being dropped
+/// and every failure looked the same from outside.
+///
+/// `RUST_LOG` still wins where it is set, so a diagnostic build can turn this up
+/// without a code change.
+fn install_logger() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // Trace on the sink, Info on the global filter. The sink's own ceiling
+        // is fixed for the life of the process; the global one can be raised
+        // later, and that is what makes the app's log-level setting mean
+        // something. Pinning both at Info is why it did not: every probe
+        // failure is logged at trace, so `no clean endpoint found` was the only
+        // thing that ever came out, whatever the user chose.
+        let config = android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Trace)
+            .with_tag("aether");
+        let logger = TeeLogger(android_logger::AndroidLogger::new(config));
+        if log::set_boxed_logger(Box::new(logger)).is_ok() {
+            log::set_max_level(log::LevelFilter::Info);
+        }
+        log::info!("aether bridge logging installed");
+    });
+}
+
+/// Raises or lowers what actually reaches the log, at any time.
+///
+/// Called whenever a configuration is applied, so changing the setting takes
+/// effect on the next connect rather than the next launch. Unknown or empty
+/// leaves the default alone -- a typo should not silence the engine.
+fn apply_log_level(level: &str) {
+    let filter = match level.trim().to_ascii_lowercase().as_str() {
+        "error" => log::LevelFilter::Error,
+        "warn" => log::LevelFilter::Warn,
+        "info" => log::LevelFilter::Info,
+        "debug" => log::LevelFilter::Debug,
+        "trace" => log::LevelFilter::Trace,
+        _ => return,
+    };
+    if log::max_level() != filter {
+        log::set_max_level(filter);
+        log::info!("engine log level is now {filter}");
+    }
+}
+
+/// Packages this install's identity so it survives a reinstall.
+///
+/// Uninstalling takes the identity with it, and Cloudflare rate-limits device
+/// registrations per address -- so a few reinstalls can leave an address refused
+/// outright, which looks exactly like a broken app.
+#[no_mangle]
+pub extern "system" fn Java_com_whitedns_whiteaesther_core_NativeAetherBridge_nativeExportIdentity<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    config_path: JString<'local>,
+) -> jstring {
+    install_logger();
+    let path: String = match env.get_string(&config_path) {
+        Ok(value) => value.into(),
+        Err(error) => return java_string(env, &failure_json(&error.to_string())),
+    };
+
+    match aether::export_identity(&path) {
+        Ok(payload) => java_string(env, &json!({ "ok": true, "payload": payload }).to_string()),
+        Err(error) => java_string(env, &failure_json(&error.to_string())),
+    }
+}
+
+/// Restores an identity produced by the export above.
+///
+/// Everything is validated before anything is written: a half-finished import
+/// would leave the device holding an identity Cloudflare does not recognise,
+/// with the working one already gone.
+#[no_mangle]
+pub extern "system" fn Java_com_whitedns_whiteaesther_core_NativeAetherBridge_nativeImportIdentity<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    config_path: JString<'local>,
+    payload: JString<'local>,
+) -> jstring {
+    install_logger();
+    let read = |env: &mut JNIEnv<'local>, value: JString<'local>| -> Result<String, String> {
+        env.get_string(&value)
+            .map(Into::into)
+            .map_err(|error| error.to_string())
+    };
+
+    let result = (|| -> Result<(), String> {
+        let path = read(&mut env, config_path)?;
+        let payload = read(&mut env, payload)?;
+        aether::import_identity(&path, &payload).map_err(|error| error.to_string())
+    })();
+
+    match result {
+        Ok(()) => java_string(env, r#"{"ok":true}"#),
+        Err(reason) => java_string(env, &failure_json(&reason)),
+    }
+}
+
+/// Takes every engine log line since the last call.
+///
+/// Pulled rather than pushed: these arrive on the engine's own threads, and a
+/// connect attempt produces hundreds during an endpoint scan.
+#[no_mangle]
+pub extern "system" fn Java_com_whitedns_whiteaesther_core_NativeAetherBridge_nativeDrainLog<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+) -> jobjectArray {
+    let lines: Vec<String> = ENGINE_LOG.lock().drain(..).collect();
+    let empty = match env.new_string("") {
+        Ok(value) => value,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let array = match env.new_object_array(lines.len() as i32, "java/lang/String", &empty) {
+        Ok(value) => value,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    for (index, line) in lines.iter().enumerate() {
+        let Ok(value) = env.new_string(line) else {
+            continue;
+        };
+        let _ = env.set_object_array_element(&array, index as i32, value);
+    }
+    array.into_raw()
+}
+
+fn failure_json(reason: &str) -> String {
+    json!({ "ok": false, "error": reason }).to_string()
+}
+
+fn java_string(mut env: JNIEnv<'_>, value: &str) -> jstring {
+    match env.new_string(value) {
+        Ok(output) => output.into_raw(),
+        Err(error) => {
+            let _ = env.throw_new(
+                "java/lang/IllegalStateException",
+                format!("failed to create native string: {error}"),
+            );
+            std::ptr::null_mut()
+        }
+    }
+}
+
+fn read_java_string(env: &mut JNIEnv<'_>, value: &JString<'_>) -> Result<String, String> {
+    env.get_string(value)
+        .map(Into::into)
+        .map_err(|error| format!("invalid JNI string: {error}"))
+}
+
+fn response(ok: bool, fields: serde_json::Value) -> String {
+    let mut object = fields.as_object().cloned().unwrap_or_default();
+    object.insert("ok".into(), serde_json::Value::Bool(ok));
+    serde_json::Value::Object(object).to_string()
+}
+
+fn error_response(error: impl std::fmt::Display) -> String {
+    response(false, serde_json::json!({"error": error.to_string()}))
+}
+
+fn runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("whiteaesther-core")
+        .thread_stack_size(CORE_STACK_BYTES)
+        .build()
+        .map_err(|error| format!("failed to start native runtime: {error}"))
+}
+
+/// Construct and poll engine futures on a native stack we own. Tokio's worker
+/// stack size does not apply to the thread calling Runtime::block_on.
+/// JNI references stay on the calling thread; only owned Rust data or scoped
+/// borrows cross this boundary, and the caller waits for cleanup to finish.
+fn core_thread<T: Send>(
+    name: &str,
+    work: impl FnOnce() -> Result<T, String> + Send,
+) -> Result<T, String> {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name(name.to_string())
+            .stack_size(CORE_STACK_BYTES)
+            .spawn_scoped(scope, work)
+            .map_err(|error| format!("failed to start {name}: {error}"))?
+            .join()
+            .map_err(|_| format!("{name} panicked"))?
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_whitedns_whiteaesther_core_NativeAetherBridge_nativeVersion(
+    env: JNIEnv<'_>,
+    _class: JClass<'_>,
+) -> jstring {
+    install_logger();
+    catch_unwind(AssertUnwindSafe(|| {
+        java_string(
+            env,
+            &format!("{}+android.{BRIDGE_VERSION}", aether::version()),
+        )
+    }))
+    .unwrap_or(std::ptr::null_mut())
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_whitedns_whiteaesther_core_NativeAetherBridge_validateConfig(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    config: JString<'_>,
+) -> jstring {
+    catch_unwind(AssertUnwindSafe(|| {
+        let result = read_java_string(&mut env, &config)
+            .and_then(|raw| BridgeConfig::parse(&raw).map(|_| ()))
+            .map(|_| {
+                response(
+                    true,
+                    serde_json::json!({
+                        "coreVersion": aether::version(),
+                        "bridgeVersion": BRIDGE_VERSION,
+                    }),
+                )
+            })
+            .unwrap_or_else(error_response);
+        java_string(env, &result)
+    }))
+    .unwrap_or(std::ptr::null_mut())
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_whitedns_whiteaesther_core_NativeAetherBridge_nativePrepare(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    config: JString<'_>,
+) -> jstring {
+    install_logger();
+    catch_unwind(AssertUnwindSafe(|| {
+        let result = (|| -> Result<String, String> {
+            if RUN_CONTROL.lock().active {
+                return Err("engine is already running".into());
+            }
+            if SCAN_RUNNING.load(Ordering::SeqCst) {
+                return Err("endpoint scan is already running".into());
+            }
+            // Preparation holds no lock of its own upstream, and this is a
+            // blocking JNI call: a caller that gave up waiting for one and
+            // started another used to get two provisionings racing for the same
+            // identity file. Refused rather than queued -- whoever is waiting
+            // has a budget, and a second wait behind the first would outlast it.
+            if PREPARE_RUNNING.swap(true, Ordering::SeqCst) {
+                return Err("route preparation is already running".into());
+            }
+            let _guard = PrepareRunningGuard;
+            PREPARE_CANCELLED.store(false, Ordering::SeqCst);
+            let raw = read_java_string(&mut env, &config)?;
+            let config = BridgeConfig::parse(&raw)?;
+            config.apply_environment();
+            let embedded = config.embedded(None)?;
+            // Raced against the cancel flag rather than simply awaited. Dropping
+            // the future is what actually ends provisioning and the endpoint
+            // search inside it; without this the caller's deadline only stopped
+            // it waiting, and the work went on behind whatever came next.
+            let prepared = core_thread("whiteaesther-prepare", || {
+                runtime()?.block_on(Box::pin(async {
+                    tokio::select! {
+                        biased;
+                        _ = until_cancelled(&PREPARE_CANCELLED) => {
+                            Err("route preparation was cancelled".to_string())
+                        }
+                        result = Box::pin(aether::prepare_embedded(&embedded)) => {
+                            result.map_err(|error| error.to_string())
+                        }
+                    }
+                }))
+            })?;
+            Ok(response(
+                true,
+                serde_json::json!({
+                    "ipv4": prepared.ipv4,
+                    "ipv6": prepared.ipv6,
+                    "peer": prepared.peer.to_string(),
+                }),
+            ))
+        })()
+        .unwrap_or_else(error_response);
+        java_string(env, &result)
+    }))
+    .unwrap_or(std::ptr::null_mut())
+}
+
+/// Buys the engine's identity without building anything with it.
+///
+/// For the moment some other carrier is already carrying traffic. On a network
+/// where `api.cloudflareclient.com` cannot be reached in any direction, that
+/// carrier's SOCKS listener is the only route a registration can leave by --
+/// and an identity bought once there makes every later connect the engine's own
+/// direct one. The config carries the proxy; the engine sends everything
+/// through it.
+///
+/// Shares preparation's flag, so the two cannot run at once and the same cancel
+/// ends either. Refused while the engine is running, because an engine that is
+/// running has whatever identity it needed.
+#[no_mangle]
+pub extern "system" fn Java_com_whitedns_whiteaesther_core_NativeAetherBridge_nativeProvision(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    config: JString<'_>,
+) -> jstring {
+    install_logger();
+    catch_unwind(AssertUnwindSafe(|| {
+        let result = (|| -> Result<String, String> {
+            if RUN_CONTROL.lock().active {
+                return Err("engine is already running".into());
+            }
+            if SCAN_RUNNING.load(Ordering::SeqCst) {
+                return Err("endpoint scan is already running".into());
+            }
+            if PREPARE_RUNNING.swap(true, Ordering::SeqCst) {
+                return Err("route preparation is already running".into());
+            }
+            let _guard = PrepareRunningGuard;
+            PREPARE_CANCELLED.store(false, Ordering::SeqCst);
+            let raw = read_java_string(&mut env, &config)?;
+            let config = BridgeConfig::parse(&raw)?;
+            config.apply_environment();
+            let embedded = config.embedded(None)?;
+            let devices = core_thread("whiteaesther-provision", || {
+                runtime()?.block_on(Box::pin(async {
+                    tokio::select! {
+                        biased;
+                        _ = until_cancelled(&PREPARE_CANCELLED) => {
+                            Err("provisioning was cancelled".to_string())
+                        }
+                        result = Box::pin(aether::provision_embedded(&embedded)) => {
+                            result.map_err(|error| error.to_string())
+                        }
+                    }
+                }))
+            })?;
+            Ok(response(true, serde_json::json!({ "devices": devices })))
+        })()
+        .unwrap_or_else(error_response);
+        java_string(env, &result)
+    }))
+    .unwrap_or(std::ptr::null_mut())
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_whitedns_whiteaesther_core_NativeAetherBridge_nativeScan(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    config: JString<'_>,
+) -> jstring {
+    install_logger();
+    catch_unwind(AssertUnwindSafe(|| {
+        let result = (|| -> Result<String, String> {
+            if RUN_CONTROL.lock().active {
+                return Err("disconnect before scanning endpoints".into());
+            }
+            if PREPARE_RUNNING.load(Ordering::SeqCst) {
+                return Err("route preparation is already running".into());
+            }
+            if SCAN_RUNNING.swap(true, Ordering::SeqCst) {
+                return Err("endpoint scan is already running".into());
+            }
+            let _guard = ScanRunningGuard;
+            SCAN_CANCELLED.store(false, Ordering::SeqCst);
+            let raw = read_java_string(&mut env, &config)?;
+            let config = BridgeConfig::parse(&raw)?;
+            *SCAN_PROGRESS.lock() = (config.scan_id, aether::scan::ScanProgress::default());
+            config.apply_environment();
+            let embedded = config.embedded(None)?;
+            let results = core_thread("whiteaesther-scan", || {
+                runtime()?.block_on(async {
+                    let observer = |progress| SCAN_PROGRESS.lock().1 = progress;
+                    let scan = aether::scan_embedded_observed(
+                        &embedded, SCAN_RESULT_LIMIT, &SCAN_CANCELLED, &observer,
+                    );
+                    tokio::pin!(scan);
+                    tokio::select! {
+                        result = &mut scan => result.map_err(|error| error.to_string()),
+                        _ = until_cancelled(&SCAN_CANCELLED) => Err("endpoint scan cancelled".into()),
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(
+                            config.scan_budget_millis.unwrap_or(600_000).clamp(1_000, 600_000)
+                        )) => {
+                            let snapshot = SCAN_PROGRESS.lock().1.clone();
+                            if snapshot.results.is_empty() {
+                                Err(format!("scan time budget reached: {}", snapshot.failures))
+                            } else {
+                                Ok(snapshot.results.into_iter().map(|hit| aether::EmbeddedScanResult {
+                                    peer: hit.peer,
+                                    rtt: std::time::Duration::from_millis(hit.rtt_ms),
+                                }).collect())
+                            }
+                        }
+                    }
+                })
+            })?;
+            Ok(response(
+                true,
+                serde_json::json!({
+                    "results": results.into_iter().map(|result| serde_json::json!({
+                        "peer": result.peer.to_string(),
+                        "rttMs": result.rtt.as_millis().min(u64::MAX as u128) as u64,
+                    })).collect::<Vec<_>>(),
+                }),
+            ))
+        })()
+        .unwrap_or_else(error_response);
+        java_string(env, &result)
+    }))
+    .unwrap_or(std::ptr::null_mut())
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_whitedns_whiteaesther_core_NativeAetherBridge_nativeTestEndpoint(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    config: JString<'_>,
+) -> jstring {
+    catch_unwind(AssertUnwindSafe(|| {
+        let result = (|| -> Result<String, String> {
+            if RUN_CONTROL.lock().active || PREPARE_RUNNING.load(Ordering::SeqCst) {
+                return Err("disconnect and stop scanning before testing an endpoint".into());
+            }
+            if SCAN_RUNNING.swap(true, Ordering::SeqCst) {
+                return Err("endpoint scan is already running".into());
+            }
+            let _guard = ScanRunningGuard;
+            SCAN_CANCELLED.store(false, Ordering::SeqCst);
+            let raw = read_java_string(&mut env, &config)?;
+            let config = BridgeConfig::parse(&raw)?;
+            config.apply_environment();
+            let embedded = config.embedded(None)?;
+            let result = core_thread("whiteaesther-test", || {
+                runtime()?.block_on(async {
+                    tokio::select! {
+                        result = Box::pin(aether::test_embedded_peer(&embedded)) =>
+                            result.map_err(|error| error.to_string()),
+                        _ = until_cancelled(&SCAN_CANCELLED) => Err("endpoint test cancelled".into()),
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(
+                            config.scan_budget_millis.unwrap_or(30_000).clamp(1_000, 30_000)
+                        )) =>
+                            Err("endpoint confirmation timed out".into()),
+                    }
+                })
+            })?;
+            Ok(response(
+                true,
+                serde_json::json!({
+                    "peer": result.peer.to_string(),
+                    "rttMs": result.rtt.as_millis().min(u64::MAX as u128) as u64,
+                }),
+            ))
+        })()
+        .unwrap_or_else(error_response);
+        java_string(env, &result)
+    }))
+    .unwrap_or(std::ptr::null_mut())
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_whitedns_whiteaesther_core_NativeAetherBridge_nativeScanProgress(
+    env: JNIEnv<'_>,
+    _class: JClass<'_>,
+) -> jstring {
+    let (scan_id, progress) = SCAN_PROGRESS.lock().clone();
+    let mut value = serde_json::to_value(&progress).unwrap_or_else(|_| json!({}));
+    value["scanId"] = json!(scan_id);
+    java_string(env, &value.to_string())
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_whitedns_whiteaesther_core_NativeAetherBridge_nativeCancelScan(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+) -> jboolean {
+    if SCAN_RUNNING.load(Ordering::SeqCst) {
+        SCAN_CANCELLED.store(true, Ordering::SeqCst);
+        JNI_TRUE
+    } else {
+        JNI_FALSE
+    }
+}
+
+/// Ends a preparation that is still running, and says whether there was one.
+///
+/// Separate from cancelScan because they interrupt different work: that one
+/// belongs to the standalone endpoint search, and never reached the
+/// provisioning and peer selection that prepare does before a session starts.
+/// Moves the running tunnel onto the network this phone is on now.
+///
+/// Returns whether there was a tunnel able to do it. Only the QUIC path can:
+/// H2 rides TCP and a moved interface closes it, and WireGuard rebinds by its
+/// own route. The caller reconnects when this says no, which is what used to
+/// happen every time.
+#[no_mangle]
+pub extern "system" fn Java_com_whitedns_whiteaesther_core_NativeAetherBridge_nativeMigrate(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+) -> jboolean {
+    if aether::migrate_running_tunnel() {
+        JNI_TRUE
+    } else {
+        JNI_FALSE
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_whitedns_whiteaesther_core_NativeAetherBridge_nativeCancelPrepare(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+) -> jboolean {
+    if PREPARE_RUNNING.load(Ordering::SeqCst) {
+        PREPARE_CANCELLED.store(true, Ordering::SeqCst);
+        JNI_TRUE
+    } else {
+        JNI_FALSE
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_whitedns_whiteaesther_core_NativeAetherBridge_nativeRun(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    config: JString<'_>,
+    prepared_peer: JString<'_>,
+    tun_fd: jint,
+    listener: JObject<'_>,
+) -> jstring {
+    install_logger();
+    catch_unwind(AssertUnwindSafe(|| {
+        let mut pending_tun = PendingTunDescriptor((tun_fd >= 0).then_some(tun_fd));
+        let result = (|| -> Result<String, String> {
+            let mut run_guard = EngineRunGuard::acquire()?;
+            if PREPARE_RUNNING.load(Ordering::SeqCst) || SCAN_RUNNING.load(Ordering::SeqCst) {
+                return Err("route preparation or scanning is still running".into());
+            }
+            let raw = read_java_string(&mut env, &config)?;
+            let peer: SocketAddr = read_java_string(&mut env, &prepared_peer)?
+                .parse()
+                .map_err(|_| "prepared peer is invalid".to_string())?;
+            let config = BridgeConfig::parse(&raw)?;
+            config.apply_environment();
+            let embedded = config.embedded(Some(peer))?;
+            let vm = Arc::new(env.get_java_vm().map_err(|error| error.to_string())?);
+            let listener = Arc::new(
+                env.new_global_ref(listener)
+                    .map_err(|error| error.to_string())?,
+            );
+            core_thread("whiteaesther-run", || {
+                let runtime = runtime()?;
+                let stop_rx = run_guard
+                    .receiver
+                    .take()
+                    .expect("new run owns its receiver");
+
+                let (endpoint, pump) = if config.mode == "tun" {
+                    if tun_fd < 0 {
+                        return Err("TUN mode requires a valid file descriptor".into());
+                    }
+                    let (device_tx, device_rx) = mpsc::channel(PACKET_QUEUE);
+                    let (tunnel_tx, tunnel_rx) = mpsc::channel(PACKET_QUEUE);
+                    let pump = tun::TunPump::start(
+                        pending_tun.0.take().expect("validated descriptor"),
+                        device_tx,
+                        tunnel_rx,
+                    )
+                    .map_err(|error| format!("failed to start TUN pump: {error}"))?;
+                    (
+                        aether::EmbeddedEndpoint::Tun {
+                            device_to_tunnel: device_rx,
+                            tunnel_to_device: tunnel_tx,
+                        },
+                        Some(pump),
+                    )
+                } else {
+                    drop(PendingTunDescriptor(pending_tun.0.take()));
+                    (aether::EmbeddedEndpoint::Socks, None)
+                };
+
+                let (ready_tx, mut ready_rx) = oneshot::channel();
+                let outcome = runtime.block_on(Box::pin(async {
+                    let mut engine =
+                        Box::pin(aether::run_embedded(embedded, endpoint, Some(ready_tx)));
+                    let mut stop_rx = Box::pin(stop_rx);
+                    tokio::select! {
+                        biased;
+                        _ = &mut stop_rx => Ok(()),
+                        result = &mut engine => result.map_err(|error| error.to_string()),
+                        ready = &mut ready_rx => {
+                            if ready.is_ok() {
+                                call_engine_ready(&vm, &listener)
+                                    .map_err(|error| error.to_string())?;
+                            }
+                            tokio::select! {
+                                biased;
+                                _ = &mut stop_rx => Ok(()),
+                                result = &mut engine => result.map_err(|error| error.to_string()),
+                            }
+                        }
+                    }
+                }));
+                drop(runtime);
+                if let Some(pump) = pump {
+                    pump.stop();
+                }
+                outcome?;
+                Ok(response(true, serde_json::json!({"stopped": true})))
+            })
+        })()
+        .unwrap_or_else(error_response);
+        java_string(env, &result)
+    }))
+    .unwrap_or(std::ptr::null_mut())
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_whitedns_whiteaesther_core_NativeAetherBridge_nativeStop(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+) -> jboolean {
+    RUN_CONTROL
+        .lock()
+        .stop
+        .take()
+        .map(|sender| {
+            let _ = sender.send(());
+            JNI_TRUE
+        })
+        .unwrap_or(JNI_FALSE)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_whitedns_whiteaesther_core_NativeAetherBridge_nativeSetSocketProtector(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    protector: JObject<'_>,
+) {
+    let result = (|| -> jni::errors::Result<()> {
+        if protector.is_null() {
+            aether::set_socket_protector(None);
+            return Ok(());
+        }
+
+        let vm = Arc::new(env.get_java_vm()?);
+        let listener = Arc::new(env.new_global_ref(protector)?);
+        aether::set_socket_protector(Some(Arc::new(move |fd| {
+            call_socket_protector(&vm, &listener, fd).unwrap_or(false)
+        })));
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        let _ = env.throw_new(
+            "java/lang/IllegalStateException",
+            format!("failed to register socket protector: {error}"),
+        );
+    }
+}
+
+fn call_socket_protector(vm: &JavaVM, listener: &GlobalRef, fd: i32) -> jni::errors::Result<bool> {
+    let mut env = vm.attach_current_thread()?;
+    env.call_method(
+        listener.as_obj(),
+        "protectSocket",
+        "(I)Z",
+        &[JValue::Int(fd)],
+    )?
+    .z()
+}
+
+fn call_engine_ready(vm: &JavaVM, listener: &GlobalRef) -> jni::errors::Result<()> {
+    let mut env = vm.attach_current_thread()?;
+    env.call_method(listener.as_obj(), "onNativeReady", "()V", &[])?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[inline(never)]
+    async fn stack_heavy_operation() -> u8 {
+        let mut buffer = [0u8; 1 << 20];
+        std::hint::black_box(&mut buffer);
+        let last = buffer.len() - 1;
+        buffer[last] = 42;
+        tokio::task::yield_now().await;
+        std::hint::black_box(buffer[last])
+    }
+
+    #[test]
+    fn a_small_jni_style_stack_can_drive_large_root_and_worker_futures() {
+        let caller = std::thread::Builder::new()
+            .stack_size(256 << 10)
+            .spawn(|| {
+                let caller_id = std::thread::current().id();
+                core_thread("whiteaesther-stack-test", || {
+                    assert_ne!(std::thread::current().id(), caller_id);
+                    let config = BridgeConfig::parse(&config(""))?.embedded(None)?;
+                    let prepare = Box::pin(aether::prepare_embedded(&config));
+                    // Construct the actual prepare future too, without polling
+                    // it or accessing the network or identity store.
+                    std::hint::black_box(&prepare);
+                    drop(prepare);
+                    runtime()?.block_on(Box::pin(async {
+                        let root = Box::pin(stack_heavy_operation()).await;
+                        let worker =
+                            tokio::spawn(async { Box::pin(stack_heavy_operation()).await })
+                                .await
+                                .map_err(|error| error.to_string())?;
+                        Ok((root, worker))
+                    }))
+                })
+            })
+            .unwrap();
+        assert_eq!(caller.join().unwrap().unwrap(), (42, 42));
+    }
+
+    #[test]
+    fn native_worker_returns_errors_after_its_cleanup_and_reports_panics() {
+        struct Guard<'a>(&'a AtomicBool);
+        impl Drop for Guard<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let cleaned = AtomicBool::new(false);
+        let error = core_thread::<()>("whiteaesther-error-test", || {
+            let _guard = Guard(&cleaned);
+            Err("cancelled".into())
+        })
+        .unwrap_err();
+        assert_eq!(error, "cancelled");
+        assert!(cleaned.load(Ordering::SeqCst));
+        assert!(
+            core_thread::<()>("whiteaesther-panic-test", || panic!("fixture"))
+                .unwrap_err()
+                .contains("panicked")
+        );
+    }
+
+    fn config(extra: &str) -> String {
+        format!(r#"{{"mode":"proxy","configPath":"aether.toml","listenPort":1819{extra}}}"#)
+    }
+
+    #[test]
+    fn the_engine_flags_the_app_never_sent_are_validated() {
+        // Seven settings the engine has always read. The app sent none of them,
+        // so the features shipped in the binary with no way to reach them.
+        assert!(BridgeConfig::parse(&config(r#","wgKeepalive":25"#)).is_ok());
+        assert!(BridgeConfig::parse(&config(r#","wgKeepalive":0"#)).is_ok());
+        // Past the point any ordinary NAT still holds the mapping, the tunnel
+        // would sit dead between packets rather than merely idle.
+        assert!(BridgeConfig::parse(&config(r#","wgKeepalive":301"#)).is_err());
+
+        assert!(BridgeConfig::parse(&config(r#","logLevel":"debug""#)).is_ok());
+        assert!(BridgeConfig::parse(&config(r#","logLevel":"""#)).is_ok());
+        assert!(BridgeConfig::parse(&config(r#","logLevel":"chatty""#)).is_err());
+    }
+
+    #[test]
+    fn the_two_default_on_flags_are_only_set_to_turn_them_off() {
+        // Both read as on unless the value is literally "0", so writing the
+        // variable when the setting is on would be describing the default back
+        // to the engine -- and getting the polarity wrong there is silent.
+        let on = BridgeConfig::parse(&config("")).unwrap();
+        assert!(on.route_sniff);
+        assert!(on.auto_reprovision);
+
+        let off =
+            BridgeConfig::parse(&config(r#","routeSniff":false,"autoReprovision":false"#)).unwrap();
+        assert!(!off.route_sniff);
+        assert!(!off.auto_reprovision);
+    }
+
+    #[test]
+    fn the_listener_stays_on_loopback_until_sharing_is_asked_for() {
+        let plain = BridgeConfig::parse(&config("")).unwrap();
+        assert!(plain.embedded(None).unwrap().listen.ip().is_loopback());
+
+        // Every install that never touches the switch keeps the behaviour it
+        // had, which is the only reason the default is safe to leave alone.
+        let shared = BridgeConfig::parse(&config(r#","lanSharing":true"#)).unwrap();
+        assert!(!shared.embedded(None).unwrap().listen.ip().is_loopback());
+    }
+
+    #[test]
+    fn sharing_without_a_password_is_allowed_and_says_so() {
+        let shared = BridgeConfig::parse(&config(r#","lanSharing":true"#)).unwrap();
+
+        // A deliberate choice, not an oversight: on a network the user owns it
+        // saves configuring every client. socks::allowed_source still holds the
+        // listener to the local network.
+        assert!(shared.access().credentials.is_none());
+    }
+
+    #[test]
+    fn half_a_credential_pair_is_refused_rather_than_ignored() {
+        // Silently dropping one half would turn "I set a username" into no
+        // password at all -- the opposite of what was asked for.
+        assert!(BridgeConfig::parse(&config(r#","lanUsername":"phone""#)).is_err());
+        assert!(BridgeConfig::parse(&config(r#","lanPassword":"secret""#)).is_err());
+        assert!(
+            BridgeConfig::parse(&config(r#","lanUsername":"phone","lanPassword":"secret""#))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn credentials_are_ignored_while_the_proxy_is_private() {
+        let private =
+            BridgeConfig::parse(&config(r#","lanUsername":"phone","lanPassword":"secret""#))
+                .unwrap();
+
+        // Demanding a password on loopback would break every local client that
+        // has none configured, and guards nothing that was reachable anyway.
+        assert!(private.access().credentials.is_none());
+
+        let shared = BridgeConfig::parse(&config(
+            r#","lanSharing":true,"lanUsername":"phone","lanPassword":"secret""#,
+        ))
+        .unwrap();
+        let credentials = shared
+            .access()
+            .credentials
+            .expect("shared demands a password");
+        assert_eq!(credentials.username, "phone");
+        assert_eq!(credentials.password, "secret");
+    }
+
+    #[test]
+    fn validates_proxy_port_and_mode() {
+        let valid = r#"{"mode":"proxy","configPath":"aether.toml","listenPort":1819}"#;
+        assert!(BridgeConfig::parse(valid).is_ok());
+        assert!(BridgeConfig::parse(r#"{"mode":"bad","configPath":"aether.toml"}"#).is_err());
+        assert!(BridgeConfig::parse(
+            r#"{"mode":"proxy","configPath":"aether.toml","listenPort":80}"#
+        )
+        .is_err());
+        assert!(BridgeConfig::parse(
+            r#"{"mode":"proxy","configPath":"aether.toml","peer":"162.159.197.3:443"}"#
+        )
+        .is_ok());
+        assert!(BridgeConfig::parse(
+            r#"{"mode":"proxy","configPath":"aether.toml","peer":"cloudflare.example:443"}"#
+        )
+        .is_err());
+        assert!(BridgeConfig::parse(
+            r#"{"mode":"proxy","configPath":"aether.toml","peerFallback":true}"#
+        )
+        .is_err());
+    }
+
+    /// The transport the app chose is the tunnel the engine builds.
+    ///
+    /// This used to end in a catch-all that turned anything unrecognised into
+    /// MASQUE. A protocol the engine gained -- masque-in-masque is the first --
+    /// would then have arrived as a single MASQUE hop while the picker said
+    /// otherwise, and every layer would have reported success. A user who tried
+    /// the nested tunnel and saw no improvement would have been right that it
+    /// did not help and wrong about what they tried.
+    #[test]
+    fn every_transport_names_the_tunnel_it_builds() {
+        let embedded = |transport: &str| {
+            BridgeConfig::parse(&format!(
+                r#"{{"mode":"proxy","configPath":"aether.toml","transport":"{transport}"}}"#
+            ))
+            .and_then(|config| config.embedded(None))
+            .map(|embedded| embedded.protocol)
+        };
+
+        // The two MASQUE framings are one tunnel; the rest are their own.
+        assert_eq!(embedded("h2").unwrap(), "masque");
+        assert_eq!(embedded("h3").unwrap(), "masque");
+        assert_eq!(embedded("wg").unwrap(), "wireguard");
+        assert_eq!(embedded("wiw").unwrap(), "warp-in-warp");
+        assert_eq!(embedded("mim").unwrap(), "masque-in-masque");
+        assert_eq!(embedded("wom").unwrap(), "wg-over-masque");
+
+        // Refused, not quietly turned into something else.
+        let refused = embedded("quantum-tunnel").unwrap_err();
+        assert!(refused.contains("transport must be"), "{refused}");
+    }
+
+    #[test]
+    fn reports_core_version() {
+        assert_eq!(BRIDGE_VERSION.split('.').count(), 3);
+        // Pinned deliberately. The engine version crosses into the app's
+        // diagnostics and its update notice, and an engine bump that nobody
+        // noticed is one nobody tested on a phone either.
+        assert_eq!(aether::version(), "2.4.0");
+    }
+
+    #[test]
+    fn registration_and_ech_lookup_addresses_are_validated_before_startup() {
+        assert!(BridgeConfig::parse(&config(r#", "encryptedHello":true,"echDns":"https://1.1.1.1/dns-query","echDomain":"cloudflare-ech.com","enrollAddress":"[2606:4700::1]:8443""#)).is_ok());
+        for extra in [
+            r#", "encryptedHello":true,"echDns":"http://resolver.example""#,
+            r#", "encryptedHello":true,"echDomain":"not a name""#,
+            r#", "enrollAddress":"localhost:0""#,
+        ] {
+            assert!(BridgeConfig::parse(&config(extra)).is_err(), "{extra}");
+        }
+        // Saved but disabled ECH fields must not prevent another protocol.
+        assert!(
+            BridgeConfig::parse(&config(r#", "encryptedHello":false,"echDns":"invalid""#)).is_ok()
+        );
+    }
+
+    #[test]
+    fn cancelling_an_engine_keeps_its_slot_until_its_own_cleanup_finishes() {
+        let mut old = EngineRunGuard::acquire().unwrap();
+        assert!(EngineRunGuard::acquire().is_err());
+        assert!(
+            RUN_CONTROL.lock().stop.is_some(),
+            "a rejected run must not clear the active stop handle"
+        );
+        RUN_CONTROL.lock().stop.take().unwrap().send(()).unwrap();
+        assert_eq!(old.receiver.as_mut().unwrap().try_recv(), Ok(()));
+        assert!(
+            EngineRunGuard::acquire().is_err(),
+            "stop signals cancellation, not completion"
+        );
+        drop(old);
+        let next = EngineRunGuard::acquire().unwrap();
+        assert!(RUN_CONTROL.lock().stop.is_some());
+        drop(next);
+        fn failed_setup() -> Result<(), &'static str> {
+            let _owner = EngineRunGuard::acquire().unwrap();
+            Err("setup failed")
+        }
+        let failed = failed_setup();
+        assert!(failed.is_err());
+        assert!(
+            !RUN_CONTROL.lock().active,
+            "setup errors release their own slot"
+        );
+        assert!(EngineRunGuard::acquire().is_ok());
+    }
+
+    #[test]
+    fn custom_tls_inputs_are_bounded_and_ech_lists_are_validated() {
+        assert!(BridgeConfig::parse(&config(r#", "fragmentTls":true,"fragmentSize":"16-32","fragmentDelay":"0-1","fragmentSni":false"#)).is_ok());
+        for value in ["0", "32-16", "1-999999", "1-2-3"] {
+            assert!(BridgeConfig::parse(&config(&format!(
+                r#", "fragmentTls":true,"fragmentSize":"{value}""#
+            )))
+            .is_err());
+        }
+        assert!(
+            BridgeConfig::parse(&config(r#", "fragmentTls":true,"fragmentDelay":"101""#)).is_err()
+        );
+        assert!(BridgeConfig::parse(&config(
+            r#", "encryptedHello":true,"customEch":true,"echConfigList":"AAAA""#
+        ))
+        .is_err());
+        assert!(
+            BridgeConfig::parse(&config(r#", "encryptedHello":true,"customEch":true"#)).is_err()
+        );
+        assert!(valid_ech_list(&[0, 5, 0xfe, 13, 0, 1, 1]));
+        assert!(!valid_ech_list(&[0, 6, 0xfe, 13, 0, 1, 1]));
+    }
+
+    #[test]
+    fn aether_24_options_map_to_the_new_environment_and_clear_on_the_next_session() {
+        let parsed = BridgeConfig::parse(&config(r#", "enrollAddress":"192.0.2.10:8443","apiHost":"api.example.test","apiSni":"api.example.test","masqueSni":"www.example.test","tls13Ciphers":"TLS_AES_128_GCM_SHA256","enableEchGrease":true"#)).unwrap();
+        parsed.apply_environment();
+        assert_eq!(
+            std::env::var("AETHER_API_ADDRESS").unwrap(),
+            "192.0.2.10:8443"
+        );
+        assert!(std::env::var("AETHER_ENROLL_ADDRESS").is_err());
+        assert_eq!(
+            std::env::var("AETHER_MASQUE_SNI").unwrap(),
+            "www.example.test"
+        );
+        assert_eq!(
+            std::env::var("AETHER_TLS13_CIPHERS").unwrap(),
+            "TLS_AES_128_GCM_SHA256"
+        );
+        assert_eq!(std::env::var("AETHER_ENABLE_ECH_GREASE").unwrap(), "1");
+        BridgeConfig::parse(&config(""))
+            .unwrap()
+            .apply_environment();
+        for variable in [
+            "AETHER_API_ADDRESS",
+            "AETHER_API_HOST",
+            "AETHER_API_SNI",
+            "AETHER_MASQUE_SNI",
+            "AETHER_TLS13_CIPHERS",
+            "AETHER_ENABLE_ECH_GREASE",
+        ] {
+            assert!(std::env::var(variable).is_err(), "{variable}");
+        }
+        assert!(BridgeConfig::parse(&config(r#", "masqueSni":"192.0.2.1""#)).is_err());
+    }
+
+    #[test]
+    fn recovery_shapes_are_explicit_and_legacy_configs_keep_normal_discovery() {
+        let legacy = BridgeConfig::parse(r#"{"mode":"proxy","configPath":"aether.toml"}"#).unwrap();
+        assert!(legacy.hello_shape.is_empty());
+        assert!(!legacy.fast_connect);
+        for shape in ["records", "compact"] {
+            let config = BridgeConfig::parse(&format!(
+                r#"{{"mode":"proxy","configPath":"aether.toml","transport":"h2","helloShape":"{shape}","fastConnect":true}}"#
+            )).unwrap();
+            assert_eq!(config.hello_shape, shape);
+            assert!(config.fast_connect);
+        }
+        assert!(BridgeConfig::parse(
+            r#"{"mode":"proxy","configPath":"aether.toml","helloShape":"unknown"}"#
+        )
+        .is_err());
+    }
+}

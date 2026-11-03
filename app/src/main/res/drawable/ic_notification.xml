@@ -1,0 +1,12 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Android notification icons use this as a monochrome alpha mask. -->
+    <group android:scaleX="0.86" android:scaleY="0.86" android:pivotX="54" android:pivotY="54">
+        <path android:fillColor="#FFFFFFFF" android:pathData="M18,51 C24,28 40,13 58,11 C77,9 89,23 101,25 C89,36 78,37 64,33 C47,28 32,35 18,51 Z" />
+        <path android:fillColor="#FFFFFFFF" android:pathData="M18,49 C31,35 44,29 61,31 C78,34 90,34 101,26 C96,42 85,48 67,47 C49,45 34,51 23,70 C16,64 15,56 18,49 Z" />
+        <path android:fillColor="#FFFFFFFF" android:pathData="M23,67 C35,77 47,79 61,73 C77,67 89,63 101,70 C88,69 78,81 64,87 C47,94 31,88 22,78 C17,73 14,68 13,63 C16,65 19,66 23,67 Z" />
+    </group>
+</vector>

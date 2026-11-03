@@ -1,0 +1,87 @@
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layoutDirection="ltr"
+    android:orientation="vertical"
+    android:paddingTop="6dp"
+    android:paddingBottom="10dp">
+    <TextView
+        android:id="@+id/notification_expanded_title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:ellipsize="end"
+        android:gravity="start|center_vertical"
+        android:maxLines="1"
+        android:textSize="15sp"
+        android:textStyle="bold" />
+    <TextView
+        android:id="@+id/notification_expanded_details"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="5dp"
+        android:ellipsize="end"
+        android:gravity="start|center_vertical"
+        android:maxLines="1"
+        android:textDirection="ltr"
+        android:textSize="13sp" />
+    <LinearLayout
+        android:id="@+id/notification_actions"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:layout_marginEnd="0dp"
+        android:gravity="center"
+        android:orientation="horizontal">
+        <LinearLayout
+            android:id="@+id/notification_ping_button"
+            android:layout_width="0dp"
+            android:layout_height="42dp"
+            android:layout_marginEnd="8dp"
+            android:layout_weight="1"
+            android:background="@drawable/notification_action_bg"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:minWidth="0dp"
+            android:orientation="horizontal"
+            android:paddingStart="10dp"
+            android:paddingEnd="10dp">
+            <ImageView
+                android:id="@+id/notification_ping_icon"
+                android:layout_width="18dp"
+                android:layout_height="18dp"
+                android:contentDescription="@null" />
+            <TextView
+                android:id="@+id/notification_ping_label"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="7dp"
+                android:textSize="14sp" />
+        </LinearLayout>
+        <LinearLayout
+            android:id="@+id/notification_disconnect_button"
+            android:layout_width="0dp"
+            android:layout_height="42dp"
+            android:layout_weight="1"
+            android:background="@drawable/notification_action_bg"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:minWidth="0dp"
+            android:orientation="horizontal"
+            android:paddingStart="10dp"
+            android:paddingEnd="10dp">
+            <ImageView
+                android:id="@+id/notification_disconnect_icon"
+                android:layout_width="18dp"
+                android:layout_height="18dp"
+                android:contentDescription="@null" />
+            <TextView
+                android:id="@+id/notification_disconnect_label"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="7dp"
+                android:textSize="14sp" />
+        </LinearLayout>
+    </LinearLayout>
+</LinearLayout>

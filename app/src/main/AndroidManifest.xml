@@ -1,0 +1,228 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!--
+      Lets the app list what the user can actually launch, for per-app routing.
+      QUERY_ALL_PACKAGES would return every service and provider too, is a
+      restricted permission on Play, and offers the user nothing they recognise.
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="text/plain" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.OPEN_DOCUMENT" />
+            <data android:mimeType="*/*" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.CREATE_DOCUMENT" />
+            <data android:mimeType="application/toml" />
+        </intent>
+    </queries>
+
+    <!-- One APK supports phones, tablets, Android TV, and Google TV. -->
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <uses-feature android:name="android.software.leanback" android:required="false" />
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!--
+        Handing the system installer an APK this app downloaded and checked. It
+        is checked first: the same signing key, the same package, a newer
+        version, the architecture this phone runs, and the SHA-256 the release
+        published. See AppUpdatePolicy.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!--
+      Doze and OEM battery managers suspend or kill long-running services, which
+      drops the tunnel while the screen is off. Persistent background execution is
+      the core function of a VPN, which is a permitted use of this permission.
+      The app only ever asks; it never assumes the exemption was granted.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!--
+      tools:replace, because psiphontunnel declares backup rules of its own and
+      this app does not do backups at all. The merger cannot decide between
+      "false" and a rules file, and getting this wrong is not a build problem:
+      it is Psiphon's data store, which holds what the device has connected to,
+      being eligible for Google's cloud backup on a phone whose owner was told
+      in PRIVACY.md that nothing here is backed up. Ours wins deliberately.
+    -->
+    <application
+        android:name=".WhiteAestherApplication"
+        android:allowBackup="false"
+        tools:replace="android:fullBackupContent"
+        android:banner="@drawable/tv_banner"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.WhiteAesther"
+        android:usesCleartextTraffic="false">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+            <!-- Long-pressing our Quick Settings tile opens the app instead of
+                 the generic Android App Info screen. -->
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".service.AetherVpnService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="vpn and local SOCKS5 proxy connection engine" />
+        </service>
+
+        <!--
+            Handing the installer the APK, and nothing else. The folder is one
+            this app writes and the installer reads, for the moment it takes to
+            read it.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.updates"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/update_paths" />
+        </provider>
+
+        <!--
+            Connecting from the shade. The settings do not change between
+            sessions for most people, so opening the app to press one button is
+            the only step this removes.
+        -->
+        <service
+            android:name=".service.AetherTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_notification"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+            <!--
+                The tile reflects the engine, not the last tap, so it is safe to
+                show before the app has ever been opened.
+            -->
+            <meta-data
+                android:name="android.service.quicksettings.ACTIVE_TILE"
+                android:value="false" />
+        </service>
+
+        <!--
+          The same argument as the tile, for people who do not use the shade.
+          Exported because the launcher hosts it; it takes no data from the
+          broadcast beyond the action names it defines itself.
+        -->
+        <receiver
+            android:name=".service.AetherWidgetProvider"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_aether_info" />
+        </receiver>
+
+        <!--
+          Carries out a widget tap. Not exported: the widget's own pending
+          intents are the only thing that should be able to start a session
+          without the app being open, and an exported activity would let any
+          app on the phone do it.
+        -->
+        <activity
+            android:name=".WidgetActionActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.WhiteAestherInvisible" />
+
+        <!--
+          Psiphon, in its own process, and that is the entire point of the
+          declaration. Its tunnel core is Go and so is the exit chain; one
+          process may host one Go runtime, because two of them export the same
+          runtime symbols into a single linker namespace and a call that binds
+          to the wrong copy takes the process down.
+
+          Not exported and not startable from outside: it takes no action that
+          another app has any business asking for, and the only thing it
+          produces is a proxy on loopback.
+        -->
+        <service
+            android:name=".service.PsiphonService"
+            android:process=":psiphon"
+            android:exported="false" />
+
+        <!--
+          Tor, and the service that drives it, in one process of their own.
+
+          tor is C and has no Go runtime to collide with mihomo's, so unlike
+          Psiphon this is not forced. It is still right: tor is loaded through a
+          JNI library with process-wide static state and a lock, so a failure in
+          it should take down something restartable rather than the process
+          holding the interface.
+
+          TorService is Guardian Project's and arrives from its own manifest,
+          which is why android:process is a replacement rather than a plain
+          attribute: the merger has to be told which of the two declarations
+          wins.
+        -->
+        <service
+            android:name=".service.TorCarrierService"
+            android:process=":tor"
+            android:exported="false" />
+
+        <service
+            android:name="org.torproject.jni.TorService"
+            android:process=":tor"
+            android:exported="false"
+            tools:node="merge"
+            tools:replace="android:process" />
+
+    </application>
+</manifest>
