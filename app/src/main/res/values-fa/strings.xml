@@ -675,7 +675,7 @@
     <string name="home_more_options_summary">شبکه و مسیریابی</string>
     <string name="home_disconnect_to_edit">برای تغییر این گزینه‌ها، ابتدا اتصال را قطع کنید.</string>
     <string name="home_method_settings">تنظیمات بیشتر اتصال</string>
-    <string name="home_no_subscription">اختیاری — اتصال با Aether یا WARP</string>
+    <string name="home_no_subscription">مدیریت لینک‌های اشتراک و نودهای مقصد</string>
     <string name="home_cloudflare_warp">کلادفلر WARP</string>
     <string name="home_cloudflare_warp_detail">تونل WARP مبتنی بر WireGuard؛ بدون نیاز به اشتراک.</string>
     <string name="always_on">همیشه روشن</string>

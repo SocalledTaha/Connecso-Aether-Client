@@ -114,6 +114,12 @@ fun ChainScreen(
             stringResource(R.string.adds_a_second_hop_after_the_tunnel),
         )
 
+        // Subscription links are also the place where users add, pin, refresh,
+        // and edit their destination nodes. Keep that management UI available
+        // even when the native chain engine is unavailable in this build.
+        SourcesCard(settings, onSettingsChange, onRefreshNodes, onRefreshSource)
+        Spacer(Modifier.height(12.dp))
+
         if (!chainState.available) {
             // The chain is loaded at run time and a build may not ship it. Saying
             // so is the whole point of the check: the alternative is a switch
@@ -148,9 +154,6 @@ fun ChainScreen(
                 )
             }
         }
-
-        Spacer(Modifier.height(12.dp))
-        SourcesCard(settings, onSettingsChange, onRefreshNodes, onRefreshSource)
 
         Spacer(Modifier.height(12.dp))
         // The switch belongs to the engine. A carrier has one path out and the

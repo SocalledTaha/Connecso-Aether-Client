@@ -681,7 +681,7 @@
     <string name="home_more_options_summary">Network and routing</string>
     <string name="home_disconnect_to_edit">Disconnect to change these options.</string>
     <string name="home_method_settings">More connection settings</string>
-    <string name="home_no_subscription">Optional — connect with Aether or WARP</string>
+    <string name="home_no_subscription">Manage subscription links and destination nodes</string>
     <string name="home_cloudflare_warp">Cloudflare WARP</string>
     <string name="home_cloudflare_warp_detail">WireGuard-based WARP tunnel. No subscription needed.</string>
     <string name="always_on">Always on</string>
