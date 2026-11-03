@@ -7,12 +7,7 @@ release updates.
 
 ## Download
 
-Get the Android package for your device from the [latest release](https://github.com/SocalledTaha/Connecso-Aether-Client/releases/latest).
-
-- **arm64-v8a**: most current Android phones.
-- **armeabi-v7a**: older 32-bit ARM devices.
-- **x86_64**: emulators and x86 Android devices.
-- **universal**: all supported architectures in one larger APK.
+Get the Android package from the [latest release](https://github.com/SocalledTaha/Connecso-Aether-Client/releases/latest). Release `0.1.0` currently includes the **arm64-v8a** APK for most current phones.
 
 Each release includes `SHA256SUMS` to verify the downloaded APK.
 
