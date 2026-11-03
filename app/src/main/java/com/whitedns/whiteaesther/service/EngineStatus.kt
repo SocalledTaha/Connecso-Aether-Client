@@ -76,9 +76,19 @@ object EngineStatusStore {
     private val mutableStatus = MutableStateFlow(EngineStatus())
     val status = mutableStatus.asStateFlow()
 
+    private val mutableHotPingMs = MutableStateFlow<Long?>(null)
+    val hotPingMs = mutableHotPingMs.asStateFlow()
+
+    fun updateHotPing(value: Long?) {
+        mutableHotPingMs.value = value?.takeIf { it > 0 }
+    }
+
     fun update(status: EngineStatus) {
         val previous = mutableStatus.value
         mutableStatus.value = status
+        if (previous.stage != status.stage) {
+            mutableHotPingMs.value = null
+        }
         if (previous.stage != status.stage || previous.message != status.message) {
             EngineLog.record(
                 level = when {

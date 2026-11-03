@@ -21,6 +21,9 @@ object ChainConfig {
 
     const val MANUAL_PROVIDER = "manual"
 
+    /** Local-only SOCKS sidecar for measuring the actual selected exit route. */
+    const val HOT_PING_PORT = 18190
+
     /**
      * The interface addresses mihomo is told it owns.
      *
@@ -70,6 +73,12 @@ object ChainConfig {
         // Off. Rules match on destination only, and resolving the owning process
         // for every connection costs a /proc walk per socket on a phone.
         append("find-process-mode: off\n")
+        // A loopback-only sidecar lets the in-process service run the same
+        // warmed HTTP hot-ping through the selected exit node as real apps.
+        // It is not exposed to the LAN and does not change the TUN route.
+        append("mixed-port: $HOT_PING_PORT\n")
+        append("allow-lan: false\n")
+        append("bind-address: 127.0.0.1\n")
 
         appendDns(socksPort, proxyName)
 
@@ -117,6 +126,7 @@ object ChainConfig {
         append("ipv6: true\n")
         append("find-process-mode: off\n")
         append("mixed-port: $listenPort\n")
+        append("socks-port: $HOT_PING_PORT\n")
         append("allow-lan: false\n")
         append("bind-address: 127.0.0.1\n")
         append("tcp-concurrent: true\n")

@@ -494,6 +494,8 @@ data class AppSettings(
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val language: AppLanguage = AppLanguage.SYSTEM,
     val showAdvanced: Boolean = false,
+    /** Check for releases automatically while a protected connection is active. */
+    val automaticUpdateChecks: Boolean = true,
 ) {
     /**
      * Desktop connection invariants. The second hop is part of the route model
@@ -653,7 +655,7 @@ data class AppSettings(
     fun connectionChoiceChanged(previous: AppSettings): Boolean =
         carrier != previous.carrier || secondCarrier != previous.secondCarrier ||
             automaticCarrier != previous.automaticCarrier || transport != previous.transport ||
-            scanStrategy != previous.scanStrategy
+            scanStrategy != previous.scanStrategy || chain.enabled != previous.chain.enabled
 
     fun toNativeJson(context: Context): String {
         val json = JSONObject()

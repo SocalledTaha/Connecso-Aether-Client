@@ -74,6 +74,16 @@ enum class EndpointOperation {
     CANCELLING,
 }
 
+enum class UpdateCheckUiState {
+    IDLE,
+    CHECKING,
+    UPDATE_AVAILABLE,
+    UP_TO_DATE,
+    RECENTLY_CHECKED,
+    FAILED,
+    NEEDS_CONNECTION,
+}
+
 data class EndpointScannerState(
     val operation: EndpointOperation? = null,
     val results: List<EndpointScanResult> = emptyList(),
@@ -164,6 +174,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             initialValue = false,
         )
     val engineStatus = EngineStatusStore.status
+    val hotPingMs = EngineStatusStore.hotPingMs
+
+    fun refreshHotPing() {
+        if (EngineStatusStore.status.value.stage != EngineStage.CONNECTED) return
+        runCatching {
+            getApplication<Application>().startService(AetherVpnService.pingIntent(getApplication()))
+        }
+    }
     private val mutableEndpointScannerState = MutableStateFlow(EndpointScannerState())
     val endpointScannerState = mutableEndpointScannerState.asStateFlow()
     private var updateJob: Job? = null
@@ -252,6 +270,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     private val mutableUpdate = MutableStateFlow<UpdateChecker.Available?>(null)
     val update = mutableUpdate.asStateFlow()
+
+    private val mutableUpdateCheckState = MutableStateFlow(UpdateCheckUiState.IDLE)
+    val updateCheckState = mutableUpdateCheckState.asStateFlow()
+    private var updateCheckJob: Job? = null
 
     private val updates = AppUpdateManager(application)
 
@@ -515,13 +537,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             // an unprotected socket would tell the network this
                             // device runs a circumvention tool; inside the
                             // tunnel it is just more session traffic.
-                            mutableInstallable.value = runCatching {
-                                updates.check(acceptPrereleases = false)
-                            }.getOrNull()
-                            mutableUpdate.value = UpdateChecker.check(
-                                getApplication(),
-                                BuildConfig.VERSION_NAME,
-                            )
+                            checkForUpdates()
                         }
                         EngineStage.IDLE -> {
                             mutableAddresses.value = mutableAddresses.value.copy(tunnel = null)
@@ -531,6 +547,60 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
         }
+    }
+
+    /** Checks only while the protected route is up; manual checks bypass the cache. */
+    fun checkForUpdates(force: Boolean = false, userRequested: Boolean = false) {
+        if (!userRequested && !settings.value.automaticUpdateChecks) return
+        if (EngineStatusStore.status.value.stage != EngineStage.CONNECTED) {
+            if (userRequested) mutableUpdateCheckState.value = UpdateCheckUiState.NEEDS_CONNECTION
+            return
+        }
+        if (updateCheckJob?.isActive == true) return
+        updateCheckJob = viewModelScope.launch {
+            mutableUpdateCheckState.value = UpdateCheckUiState.CHECKING
+            try {
+                if (userRequested || force) {
+                    when (val result = UpdateChecker.checkNow(
+                        getApplication(),
+                        BuildConfig.VERSION_NAME,
+                        force = force,
+                    )) {
+                    is UpdateChecker.CheckResult.Update -> {
+                        publishAvailableUpdate(result.available)
+                        mutableUpdateCheckState.value = UpdateCheckUiState.UPDATE_AVAILABLE
+                    }
+                    UpdateChecker.CheckResult.UpToDate -> {
+                        mutableUpdate.value = null
+                        mutableInstallable.value = null
+                        mutableUpdateCheckState.value = UpdateCheckUiState.UP_TO_DATE
+                    }
+                    UpdateChecker.CheckResult.Failed -> mutableUpdateCheckState.value = UpdateCheckUiState.FAILED
+                    UpdateChecker.CheckResult.Throttled -> mutableUpdateCheckState.value = UpdateCheckUiState.RECENTLY_CHECKED
+                    }
+                } else {
+                    val available = UpdateChecker.check(getApplication(), BuildConfig.VERSION_NAME)
+                    if (available != null) {
+                        publishAvailableUpdate(available)
+                        mutableUpdateCheckState.value = UpdateCheckUiState.UPDATE_AVAILABLE
+                    } else {
+                        mutableUpdate.value = null
+                        mutableInstallable.value = null
+                        mutableUpdateCheckState.value = UpdateCheckUiState.IDLE
+                    }
+                }
+            } catch (_: Exception) {
+                mutableUpdateCheckState.value = UpdateCheckUiState.FAILED
+            }
+        }
+    }
+
+    private suspend fun publishAvailableUpdate(available: UpdateChecker.Available) {
+        val installableRelease = runCatching { updates.check(acceptPrereleases = false) }.getOrNull()
+        mutableInstallable.value = installableRelease
+        mutableUpdate.value = installableRelease?.let {
+            UpdateChecker.Available(it.version, it.url)
+        } ?: available
     }
 
     /**

@@ -685,6 +685,10 @@
     <string name="home_state_preparing">در حال آماده‌سازی</string>
     <string name="home_state_connecting">در حال اتصال</string>
     <string name="home_state_connected">متصل</string>
+    <string name="home_hot_ping">%1$s</string>
+    <string name="refresh_ping">تازه‌سازی پینگ</string>
+    <string name="connection_state">وضعیت</string>
+    <string name="connection_transport">انتقال</string>
     <string name="home_state_stopping">در حال قطع اتصال</string>
     <string name="home_details">جزئیات اتصال</string>
     <string name="home_hide_details">بستن جزئیات</string>
@@ -710,5 +714,26 @@
     <string name="masque_sni">نام سرور MASQUE (اختیاری)</string>
     <string name="warp_api_host">نام میزبان API وارپ (اختیاری)</string>
     <string name="warp_api_sni">نام سرور TLS برای API وارپ (اختیاری)</string>
+    <string name="updates">به‌روزرسانی‌ها</string>
+    <string name="about_updates_description">بررسی آخرین نسخهٔ Connecso Aether Client.</string>
+    <string name="about_updates_connection_note">بررسی به‌روزرسانی فقط هنگام فعال بودن اتصال امن انجام می‌شود.</string>
+    <string name="automatically_check_for_updates">بررسی خودکار به‌روزرسانی‌ها</string>
+    <string name="check_for_updates_now">بررسی به‌روزرسانی</string>
+    <string name="update_checking">در حال بررسی…</string>
+    <string name="update_available_version">نسخهٔ %1$s در دسترس است.</string>
+    <string name="update_up_to_date">برنامه به‌روز است.</string>
+    <string name="update_checked_recently">تازه بررسی شده؛ چند دقیقهٔ دیگر دوباره تلاش کنید.</string>
+    <string name="update_check_failed">بررسی ناموفق بود. هنگام اتصال دوباره تلاش کنید.</string>
+    <string name="update_check_needs_connection">برای بررسی امن، ابتدا متصل شوید.</string>
+    <string name="update_check_idle">هنوز نسخه‌ای بررسی نشده است.</string>
+    <string name="view_update">مشاهدهٔ نسخهٔ %1$s</string>
+    <string name="refresh_subscription">به‌روزرسانی اشتراک</string>
+    <string name="pin_as_default">انتخاب به‌عنوان اشتراک پیش‌فرض</string>
+    <string name="unpin_default_subscription">برداشتن از پیش‌فرض</string>
+    <string name="copy_subscription_link">کپی لینک اشتراک</string>
+    <string name="subscription_link_copied">لینک اشتراک کپی شد</string>
+    <string name="delete_subscription">حذف اشتراک</string>
+    <string name="confirm_delete_subscription">اشتراک «%1$s» حذف شود؟</string>
+    <string name="delete">حذف</string>
 </resources>
 

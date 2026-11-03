@@ -61,6 +61,7 @@ import com.whitedns.whiteaesther.ChainState
 import com.whitedns.whiteaesther.BridgeMessage
 import com.whitedns.whiteaesther.EndpointScannerState
 import com.whitedns.whiteaesther.IdentityMessage
+import com.whitedns.whiteaesther.UpdateCheckUiState
 import com.whitedns.whiteaesther.R
 import com.whitedns.whiteaesther.data.AppSettings
 import com.whitedns.whiteaesther.data.AppLanguage
@@ -101,6 +102,8 @@ private enum class Destination(val tab: Tab?) {
 fun WhiteAestherApp(
     settings: AppSettings,
     engineStatus: EngineStatus,
+    hotPingMs: Long? = null,
+    onRefreshHotPing: () -> Unit = {},
     endpointScannerState: EndpointScannerState,
     chainState: ChainState = ChainState(),
     nativeVersion: String?,
@@ -135,6 +138,8 @@ fun WhiteAestherApp(
     traffic: TrafficSample = TrafficSample(),
     subscriptionUsage: SubscriptionUsage? = null,
     update: UpdateChecker.Available? = null,
+    updateCheckState: UpdateCheckUiState = UpdateCheckUiState.IDLE,
+    onCheckUpdates: () -> Unit = {},
     updateDownload: UpdateDownload = UpdateDownload.Idle,
     canInstallUpdate: Boolean = false,
     updatesInPlace: Boolean = false,
@@ -244,6 +249,8 @@ fun WhiteAestherApp(
                     Destination.HOME -> HomeScreen(
                         settings = settings,
                         status = engineStatus,
+                        hotPingMs = hotPingMs,
+                        onRefreshHotPing = onRefreshHotPing,
                         addresses = addresses,
                         traffic = traffic,
                         subscriptionUsage = subscriptionUsage,
@@ -392,6 +399,12 @@ fun WhiteAestherApp(
                     Destination.ABOUT -> AboutScreen(
                         nativeVersion = nativeVersion,
                         settings = settings,
+                        connected = engineStatus.stage == EngineStage.CONNECTED,
+                        update = update,
+                        updateCheckState = updateCheckState,
+                        onCheckUpdates = onCheckUpdates,
+                        onSettingsChange = onSettingsChange,
+                        onOpenUpdate = onOpenUpdate,
                         onBack = ::goBack,
                     )
                 }

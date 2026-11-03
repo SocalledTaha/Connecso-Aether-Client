@@ -1,5 +1,8 @@
 package com.whitedns.whiteaesther.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.widget.Toast
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -39,7 +42,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -206,6 +211,7 @@ fun ChainScreen(
 @Composable
 private fun SourcesCard(settings: AppSettings, onSettingsChange: (AppSettings) -> Unit, onRefreshAll: () -> Unit, onRefreshSource: (String) -> Unit) {
     val colors = AetherTheme.colors
+    val context = LocalContext.current
     val chain = settings.chain
     var draft by rememberSaveable { mutableStateOf("") }
     var pasting by rememberSaveable { mutableStateOf(false) }
@@ -226,40 +232,49 @@ private fun SourcesCard(settings: AppSettings, onSettingsChange: (AppSettings) -
             Divider()
             var editing by rememberSaveable(source.url) { mutableStateOf(false) }
             var editedUrl by rememberSaveable(source.url) { mutableStateOf(source.url) }
+            var confirmDelete by rememberSaveable(source.url) { mutableStateOf(false) }
             val updatedSources: (ChainSource) -> Unit = { replacement ->
-                onSettingsChange(settings.copy(chain = chain.copy(sources = chain.sources.toMutableList().also { it[index] = replacement })))
+                val nextSources = chain.sources.toMutableList().also { it[index] = replacement }
+                val fallback = nextSources.firstOrNull { it.enabled && it.url != source.url }?.url
+                onSettingsChange(settings.copy(chain = chain.copy(
+                    sources = nextSources,
+                    activeSubscriptionUrl = if (!replacement.enabled && chain.activeSubscriptionUrl == source.url) fallback else chain.activeSubscriptionUrl,
+                    defaultSubscriptionUrl = if (!replacement.enabled && chain.defaultSubscriptionUrl == source.url) fallback else chain.defaultSubscriptionUrl,
+                )))
             }
             Column(Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 9.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(checked = source.enabled, onCheckedChange = { updatedSources(source.copy(enabled = it)) }, colors = CheckboxDefaults.colors(checkedColor = colors.brand))
-                    Column(Modifier.weight(1f).clickable { onSettingsChange(settings.copy(chain = chain.copy(activeSubscriptionUrl = source.url))) }) {
+                    Column(Modifier.weight(1f)) {
                         Text(source.name, style = AetherTheme.type.RowTitle, color = colors.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(source.url, style = AetherTheme.type.Small, color = colors.text3, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
-                    Box(Modifier.size(34.dp).clip(CircleShape).clickable { onRefreshSource(source.url) }, contentAlignment = Alignment.Center) {
-                        Icon(AetherIcons.Refresh, stringResource(R.string.refresh), Modifier.size(18.dp), colors.brand)
+                    Box(Modifier.size(34.dp).clip(CircleShape).clickable(role = Role.Button, onClick = { onRefreshSource(source.url) }), contentAlignment = Alignment.Center) {
+                        Icon(AetherIcons.Refresh, stringResource(R.string.refresh_subscription), Modifier.size(18.dp), colors.brand)
                     }
-                    Box(Modifier.size(34.dp).clip(CircleShape).clickable {
-                        onSettingsChange(settings.copy(chain = chain.copy(defaultSubscriptionUrl = source.url)))
-                    }, contentAlignment = Alignment.Center) {
-                        Icon(AetherIcons.Pin, stringResource(R.string.default_subscription), Modifier.size(18.dp), if (chain.defaultSubscriptionUrl == source.url) colors.brand else colors.text3)
-                    }
-                    Box(Modifier.size(34.dp).clip(CircleShape).clickable {
-                        onSettingsChange(settings.copy(chain = chain.copy(sources = chain.sources + source.copy(name = "${source.name} (copy)"))))
-                    }, contentAlignment = Alignment.Center) {
-                        Icon(AetherIcons.Copy, stringResource(R.string.duplicate), Modifier.size(18.dp), colors.text3)
-                    }
-                    Box(Modifier.size(34.dp).clip(CircleShape).clickable { editing = true }, contentAlignment = Alignment.Center) {
-                        Text("✎", color = colors.text3, style = AetherTheme.type.RowTitle)
-                    }
-                    Box(Modifier.size(34.dp).clip(CircleShape).clickable {
-                        val next = chain.sources.filterIndexed { at, _ -> at != index }
+                    Box(Modifier.size(34.dp).clip(CircleShape).clickable(role = Role.Button, onClick = {
+                        val selected = chain.defaultSubscriptionUrl != source.url
+                        val enabled = if (selected && !source.enabled) chain.sources.toMutableList().also { it[index] = source.copy(enabled = true) } else chain.sources
                         onSettingsChange(settings.copy(chain = chain.copy(
-                            sources = next,
-                            activeSubscriptionUrl = chain.activeSubscriptionUrl.takeUnless { it == source.url },
-                            defaultSubscriptionUrl = chain.defaultSubscriptionUrl.takeUnless { it == source.url },
+                            sources = enabled,
+                            defaultSubscriptionUrl = if (selected) source.url else null,
                         )))
-                    }, contentAlignment = Alignment.Center) { Text("×", color = colors.text3, style = AetherTheme.type.RowTitle) }
+                    }), contentAlignment = Alignment.Center) {
+                        Icon(AetherIcons.Pin, stringResource(if (chain.defaultSubscriptionUrl == source.url) R.string.unpin_default_subscription else R.string.pin_as_default), Modifier.size(18.dp), if (chain.defaultSubscriptionUrl == source.url) colors.brand else colors.text3)
+                    }
+                    Box(Modifier.size(34.dp).clip(CircleShape).clickable(role = Role.Button, onClick = {
+                        (context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as? ClipboardManager)
+                            ?.setPrimaryClip(ClipData.newPlainText(source.name, source.url))
+                        Toast.makeText(context, context.getString(R.string.subscription_link_copied), Toast.LENGTH_SHORT).show()
+                    }), contentAlignment = Alignment.Center) {
+                        Icon(AetherIcons.Copy, stringResource(R.string.copy_subscription_link), Modifier.size(18.dp), colors.text3)
+                    }
+                    Box(Modifier.size(34.dp).clip(CircleShape).clickable(role = Role.Button, onClick = { editing = true }), contentAlignment = Alignment.Center) {
+                        Icon(AetherIcons.Edit, stringResource(R.string.edit_subscription), Modifier.size(17.dp), colors.text3)
+                    }
+                    Box(Modifier.size(34.dp).clip(CircleShape).clickable(role = Role.Button, onClick = { confirmDelete = true }), contentAlignment = Alignment.Center) {
+                        Icon(AetherIcons.Trash, stringResource(R.string.delete_subscription), Modifier.size(17.dp), colors.text3)
+                    }
                 }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                     Checkbox(checked = source.autoRefresh, onCheckedChange = { updatedSources(source.copy(autoRefresh = it)) }, colors = CheckboxDefaults.colors(checkedColor = colors.brand))
@@ -271,8 +286,29 @@ private fun SourcesCard(settings: AppSettings, onSettingsChange: (AppSettings) -
                     }) { Text(stringResource(R.string.every_hours, source.refreshIntervalHours), color = colors.brand) }
                     Spacer(Modifier.weight(1f))
                     if (chain.activeSubscriptionUrl == source.url) Text(stringResource(R.string.active_subscription), style = AetherTheme.type.Small, color = colors.brand)
-                    else TextButton(onClick = { onSettingsChange(settings.copy(chain = chain.copy(activeSubscriptionUrl = source.url))) }) { Text(stringResource(R.string.set_active), color = colors.text3) }
+                    else TextButton(onClick = {
+                        val enabled = if (source.enabled) chain.sources else chain.sources.toMutableList().also { it[index] = source.copy(enabled = true) }
+                        onSettingsChange(settings.copy(chain = chain.copy(sources = enabled, activeSubscriptionUrl = source.url)))
+                    }) { Text(stringResource(R.string.set_active), color = colors.text3) }
                 }
+            }
+            if (confirmDelete) {
+                AlertDialog(
+                    onDismissRequest = { confirmDelete = false },
+                    title = { Text(stringResource(R.string.delete_subscription)) },
+                    text = { Text(stringResource(R.string.confirm_delete_subscription, source.name)) },
+                    confirmButton = { TextButton(onClick = {
+                        val next = chain.sources.filterIndexed { at, _ -> at != index }
+                        val fallback = next.firstOrNull { it.enabled }?.url
+                        onSettingsChange(settings.copy(chain = chain.copy(
+                            sources = next,
+                            activeSubscriptionUrl = if (chain.activeSubscriptionUrl == source.url) fallback else chain.activeSubscriptionUrl,
+                            defaultSubscriptionUrl = if (chain.defaultSubscriptionUrl == source.url) fallback else chain.defaultSubscriptionUrl,
+                        )))
+                        confirmDelete = false
+                    }) { Text(stringResource(R.string.delete)) } },
+                    dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text(stringResource(R.string.cancel)) } },
+                )
             }
             if (editing) {
                 AlertDialog(

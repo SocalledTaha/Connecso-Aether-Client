@@ -148,6 +148,8 @@ object AetherIcons {
         "M12 21s7-5.4 7-11a7 7 0 1 0-14 0c0 5.6 7 11 7 11Z",
         "M12 7.4a2.6 2.6 0 1 0 0 5.2 2.6 2.6 0 0 0 0-5.2Z",
     )
+    val Edit = strokeIcon("edit", "M12 20h9", "M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z")
+    val Trash = strokeIcon("trash", "M4 7h16", "M10 11v6M14 11v6", "M5 7l1 14h12l1-14", "M9 7V4h6v3")
     val Shield = strokeIcon("shield", "M12 3 5 6v6c0 4.4 3 8.2 7 9 4-.8 7-4.6 7-9V6l-7-3Z")
     val Sparkle = strokeIcon(
         "sparkle",

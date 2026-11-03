@@ -691,6 +691,10 @@
     <string name="home_state_preparing">Preparing</string>
     <string name="home_state_connecting">Connecting</string>
     <string name="home_state_connected">Connected</string>
+    <string name="home_hot_ping">%1$s</string>
+    <string name="refresh_ping">Refresh ping</string>
+    <string name="connection_state">Status</string>
+    <string name="connection_transport">Transport</string>
     <string name="home_state_stopping">Disconnecting</string>
     <string name="home_details">Connection details</string>
     <string name="home_hide_details">Hide details</string>
@@ -716,5 +720,26 @@
     <string name="masque_sni">MASQUE server name (optional)</string>
     <string name="warp_api_host">WARP API host (optional)</string>
     <string name="warp_api_sni">WARP API server name (optional)</string>
+    <string name="updates">Updates</string>
+    <string name="about_updates_description">Check for the latest Connecso Aether Client release.</string>
+    <string name="about_updates_connection_note">Update checks run only while a protected connection is active.</string>
+    <string name="automatically_check_for_updates">Automatically check for updates</string>
+    <string name="check_for_updates_now">Check for updates now</string>
+    <string name="update_checking">Checking for updates…</string>
+    <string name="update_available_version">Version %1$s is available.</string>
+    <string name="update_up_to_date">You have the latest version.</string>
+    <string name="update_checked_recently">Checked recently. Try again in a few minutes.</string>
+    <string name="update_check_failed">Could not check for updates. Try again while connected.</string>
+    <string name="update_check_needs_connection">Connect first to check for updates securely.</string>
+    <string name="update_check_idle">Updates have not been checked yet.</string>
+    <string name="view_update">View update %1$s</string>
+    <string name="refresh_subscription">Refresh subscription</string>
+    <string name="pin_as_default">Set as default subscription</string>
+    <string name="unpin_default_subscription">Remove default subscription</string>
+    <string name="copy_subscription_link">Copy subscription link</string>
+    <string name="subscription_link_copied">Subscription link copied</string>
+    <string name="delete_subscription">Delete subscription</string>
+    <string name="confirm_delete_subscription">Delete %1$s from your subscriptions?</string>
+    <string name="delete">Delete</string>
 </resources>
 

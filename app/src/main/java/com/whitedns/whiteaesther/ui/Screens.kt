@@ -11,6 +11,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
@@ -32,6 +33,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -111,6 +113,7 @@ import com.whitedns.whiteaesther.service.LogEntry
 import com.whitedns.whiteaesther.service.LogLevel
 import com.whitedns.whiteaesther.service.TrafficSample
 import com.whitedns.whiteaesther.data.UpdateDownload
+import com.whitedns.whiteaesther.UpdateCheckUiState
 import com.whitedns.whiteaesther.service.formatBytes
 import java.io.File
 import com.whitedns.whiteaesther.service.formatRate
@@ -201,20 +204,33 @@ fun EngineStage.toConnectState(): ConnectState = when (this) {
 
 /** The scrolling page body every screen sits in. */
 @Composable
-internal fun ScreenColumn(content: @Composable ColumnScopeAlias.() -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp)
-            .padding(bottom = 26.dp)
-            // Inside the scroll, so the keyboard adds room to scroll into rather
-            // than shrinking the page. Without it the control below a field is
-            // underneath the keyboard the field just opened -- which on the exit
-            // chain is the button that saves what was typed.
-            .imePadding(),
-        content = content,
-    )
+internal fun ScreenColumn(
+    fillViewport: Boolean = false,
+    distributeSpace: Boolean = false,
+    bottomAlign: Boolean = false,
+    content: @Composable ColumnScopeAlias.() -> Unit,
+) {
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(if (fillViewport) Modifier.heightIn(min = maxHeight) else Modifier)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 26.dp)
+                // Inside the scroll, so the keyboard adds room to scroll into rather
+                // than shrinking the page. Without it the control below a field is
+                // underneath the keyboard the field just opened -- which on the exit
+                // chain is the button that saves what was typed.
+                .imePadding(),
+            verticalArrangement = when {
+                bottomAlign -> Arrangement.Bottom
+                distributeSpace -> Arrangement.SpaceBetween
+                else -> Arrangement.Top
+            },
+            content = content,
+        )
+    }
 }
 
 // ------------------------------------------------------------------ home ----
@@ -284,6 +300,8 @@ private fun CarrierPathRow(
 fun HomeScreen(
     settings: AppSettings,
     status: EngineStatus,
+    hotPingMs: Long? = null,
+    onRefreshHotPing: () -> Unit = {},
     addresses: AddressPair,
     traffic: TrafficSample,
     subscriptionUsage: SubscriptionUsage? = null,
@@ -318,6 +336,7 @@ fun HomeScreen(
     val state = status.stage.toConnectState()
     val configuration = LocalConfiguration.current
     var destinationDialog by rememberSaveable { mutableStateOf(false) }
+    var connectionDetailsDialog by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(destinationDialog, settings.chain.fingerprint(), status.stage) {
         if (destinationDialog && status.stage == EngineStage.CONNECTED) onLoadChainNodes()
     }
@@ -353,7 +372,8 @@ fun HomeScreen(
         }
     }
 
-    ScreenColumn {
+    ScreenColumn(fillViewport = true, bottomAlign = true) {
+        Column {
         Spacer(Modifier.height(if (compact) 10.dp else 18.dp))
         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
             ConnecsoConnectionButton(
@@ -393,6 +413,30 @@ fun HomeScreen(
                     else -> colors.text2
                 },
             )
+            if (status.stage == EngineStage.CONNECTED) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    modifier = Modifier.testTag("home-keepalive-hot-ping"),
+                ) {
+                    Text(
+                        hotPingMs?.let { "$it ms" } ?: "—",
+                        style = AetherTheme.type.Small,
+                        color = colors.text2,
+                    )
+                    IconButton(
+                        onClick = onRefreshHotPing,
+                        modifier = Modifier.size(34.dp),
+                    ) {
+                        Icon(
+                            AetherIcons.Refresh,
+                            contentDescription = stringResource(R.string.refresh_ping),
+                            modifier = Modifier.size(17.dp),
+                            tint = colors.brand,
+                        )
+                    }
+                }
+            }
             if (status.stage == EngineStage.CONNECTED && status.connectedAtMillis != null) {
                 Text(
                     String.format(java.util.Locale.ROOT, "%02d:%02d:%02d",
@@ -419,6 +463,8 @@ fun HomeScreen(
                     textAlign = androidx.compose.ui.text.style.TextAlign.Center)
             }
         }
+        }
+        Column {
         val destinationValue = when {
             chainSelection == "DIRECT" || settings.chain.node == "DIRECT" -> stringResource(R.string.warp_direct_destination)
             !chainSelection.isNullOrBlank() -> chainSelection
@@ -445,19 +491,21 @@ fun HomeScreen(
             }
         }
         Spacer(Modifier.height(10.dp))
-        AetherCard {
+        AetherCard(modifier = Modifier
+            .clickable(role = Role.Button, onClick = { connectionDetailsDialog = true })
+            .testTag("home-connection-details")) {
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(stringResource(R.string.home_connection_type), style = AetherTheme.type.RowTitle, color = colors.text)
+                    Text(stringResource(R.string.home_details), style = AetherTheme.type.RowTitle, color = colors.text)
                     Text(
                         stringResource(
                             R.string.home_connection_mode_summary,
                             stringResource(settings.transport.label),
-                            stringResource(R.string.home_mode_vpn),
+                            stringResource(if (settings.mode == com.whitedns.whiteaesther.data.EngineMode.PROXY) R.string.home_mode_proxy else R.string.home_mode_vpn),
                         ),
                         style = AetherTheme.type.Small, color = colors.text2,
                     )
@@ -530,6 +578,38 @@ fun HomeScreen(
                 },
                 onDismiss = { destinationDialog = false },
             )
+        }
+        if (connectionDetailsDialog) {
+            Dialog(onDismissRequest = { connectionDetailsDialog = false }) {
+                AetherCard(Modifier.fillMaxWidth().widthIn(max = 440.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(start = 16.dp, end = 12.dp, top = 14.dp, bottom = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(stringResource(R.string.home_details), Modifier.weight(1f), style = AetherTheme.type.CardTitle, color = colors.text)
+                        Text("×", Modifier.clickable { connectionDetailsDialog = false }.padding(8.dp), style = AetherTheme.type.PageTitle, color = colors.text2)
+                    }
+                    Divider()
+                    FactRow(stringResource(R.string.connection_state), stringResource(when (status.stage) {
+                        EngineStage.IDLE -> R.string.home_state_idle
+                        EngineStage.PREPARING -> R.string.home_state_preparing
+                        EngineStage.CONNECTING -> R.string.home_state_connecting
+                        EngineStage.CONNECTED -> R.string.home_state_connected
+                        EngineStage.STOPPING -> R.string.home_state_stopping
+                        EngineStage.ERROR -> R.string.couldn_t_connect
+                    }))
+                    FactRow(stringResource(R.string.connection_transport), stringResource(settings.transport.label))
+                    FactRow(stringResource(R.string.coverage), stringResource(if (settings.mode == com.whitedns.whiteaesther.data.EngineMode.PROXY) R.string.home_mode_proxy else R.string.home_mode_vpn))
+                    FactRow(stringResource(R.string.carrier), stringResource(settings.carrier.label))
+                    FactRow(stringResource(R.string.destination), destinationValue)
+                    FactRow(stringResource(R.string.endpoint), status.peer ?: stringResource(R.string.fact_unavailable), mono = true)
+                    OutlineButton(
+                        text = stringResource(R.string.cancel),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 7.dp),
+                        onClick = { connectionDetailsDialog = false },
+                    )
+                }
+            }
         }
 
         val attention = homeAttention(settings, status)
@@ -684,6 +764,7 @@ fun HomeScreen(
                 }
             }
             Spacer(Modifier.height(12.dp))
+        }
         }
 
     }
@@ -2904,7 +2985,18 @@ fun IdentityScreen(
 }
 
 @Composable
-fun AboutScreen(nativeVersion: String?, settings: AppSettings, onBack: () -> Unit) {
+fun AboutScreen(
+    nativeVersion: String?,
+    settings: AppSettings,
+    connected: Boolean,
+    update: UpdateChecker.Available?,
+    updateCheckState: UpdateCheckUiState,
+    onCheckUpdates: () -> Unit,
+    onSettingsChange: (AppSettings) -> Unit,
+    onOpenUpdate: (String) -> Unit,
+    onBack: () -> Unit,
+) {
+    val colors = AetherTheme.colors
     ScreenColumn {
         CrumbBar(stringResource(R.string.settings_about), onBack = onBack)
         PageTitle(stringResource(R.string.about_whiteaesther))
@@ -2918,6 +3010,44 @@ fun AboutScreen(nativeVersion: String?, settings: AppSettings, onBack: () -> Uni
             FactRow(stringResource(R.string.fact_engine), nativeVersion ?: stringResource(R.string.fact_unavailable), mono = true)
             Divider()
             FactRow(stringResource(R.string.fact_package), com.whitedns.whiteaesther.BuildConfig.APPLICATION_ID, mono = true)
+        }
+        Spacer(Modifier.height(12.dp))
+        AetherCard {
+            CardHead(
+                stringResource(R.string.updates),
+                stringResource(R.string.about_updates_description),
+            )
+            Divider()
+            CheckRow(
+                title = stringResource(R.string.automatically_check_for_updates),
+                subtitle = stringResource(R.string.about_updates_connection_note),
+                checked = settings.automaticUpdateChecks,
+                onCheckedChange = { onSettingsChange(settings.copy(automaticUpdateChecks = it)) },
+            )
+            Divider()
+            val statusText = when (updateCheckState) {
+                UpdateCheckUiState.CHECKING -> stringResource(R.string.update_checking)
+                UpdateCheckUiState.UPDATE_AVAILABLE -> stringResource(R.string.update_available_version, update?.version.orEmpty())
+                UpdateCheckUiState.UP_TO_DATE -> stringResource(R.string.update_up_to_date)
+                UpdateCheckUiState.RECENTLY_CHECKED -> stringResource(R.string.update_checked_recently)
+                UpdateCheckUiState.FAILED -> stringResource(R.string.update_check_failed)
+                UpdateCheckUiState.NEEDS_CONNECTION -> stringResource(R.string.update_check_needs_connection)
+                UpdateCheckUiState.IDLE -> stringResource(R.string.update_check_idle)
+            }
+            Text(
+                statusText,
+                style = AetherTheme.type.Small,
+                color = if (updateCheckState == UpdateCheckUiState.FAILED) colors.signalFailed else colors.text2,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 10.dp),
+            )
+            PrimaryButton(
+                text = if (update != null) stringResource(R.string.view_update, update.version)
+                    else stringResource(if (updateCheckState == UpdateCheckUiState.CHECKING) R.string.update_checking else R.string.check_for_updates_now),
+                icon = AetherIcons.Refresh,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
+                enabled = update != null || updateCheckState != UpdateCheckUiState.CHECKING,
+                onClick = { if (update != null) onOpenUpdate(update.url) else onCheckUpdates() },
+            )
         }
     }
 }

@@ -28,14 +28,22 @@ object UpdateChecker {
         "https://github.com/${AppUpdatePolicy.REPOSITORY}/releases/latest"
     private const val TIMEOUT_MS = 8_000
 
-    /** Once a day is often enough for something released every few weeks. */
-    private const val CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000L
+    /** Background checks are throttled; a manual check always bypasses this. */
+    private const val CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000L
+    private const val FORCED_CHECK_INTERVAL_MS = 5 * 60 * 1000L
 
     private val Context.updateStore by preferencesDataStore(name = "whiteaesther_updates")
     private val LAST_CHECKED = longPreferencesKey("last_checked")
     private val DISMISSED_VERSION = stringPreferencesKey("dismissed_version")
 
     data class Available(val version: String, val url: String = RELEASES_PAGE)
+
+    sealed interface CheckResult {
+        data class Update(val available: Available) : CheckResult
+        data object UpToDate : CheckResult
+        data object Failed : CheckResult
+        data object Throttled : CheckResult
+    }
 
     /**
      * Looks for a newer release, or returns null.
@@ -45,7 +53,14 @@ object UpdateChecker {
      * has already said no to. A checker that reported its own failures would
      * interrupt a session to say nothing.
      */
-    suspend fun check(context: Context, currentVersion: String): Available? {
+    suspend fun check(context: Context, currentVersion: String): Available? =
+        when (val result = checkNow(context, currentVersion, force = false)) {
+            is CheckResult.Update -> result.available
+            else -> null
+        }
+
+    /** A user-triggered check can bypass the background cache immediately. */
+    suspend fun checkNow(context: Context, currentVersion: String, force: Boolean): CheckResult {
         val store = context.updateStore
         val preferences = store.data.first()
 
@@ -53,14 +68,15 @@ object UpdateChecker {
         val last = preferences[LAST_CHECKED] ?: 0L
         // A clock moved backwards would otherwise lock checking out until the
         // original time came round again.
-        if (last in 1..now && now - last < CHECK_INTERVAL_MS) return null
+        val interval = if (force) FORCED_CHECK_INTERVAL_MS else CHECK_INTERVAL_MS
+        if (last in 1..now && now - last < interval) return CheckResult.Throttled
 
-        val latest = fetchLatestTag() ?: return null
+        val latest = fetchLatestTag() ?: return CheckResult.Failed
         store.edit { it[LAST_CHECKED] = now }
 
-        if (preferences[DISMISSED_VERSION] == latest) return null
-        if (!isNewer(latest, currentVersion)) return null
-        return Available(latest)
+        if (preferences[DISMISSED_VERSION] == latest) return CheckResult.UpToDate
+        if (!isNewer(latest, currentVersion)) return CheckResult.UpToDate
+        return CheckResult.Update(Available(latest))
     }
 
     /** Remembers that the user does not want to hear about this one again. */

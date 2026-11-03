@@ -139,6 +139,10 @@ class MainActivity : ComponentActivity() {
             return
         }
         batteryExempt = isIgnoringBatteryOptimizations()
+        // A release may have appeared while the activity was in the
+        // background. Recheck on return, but only over an already active
+        // protected route and only when automatic checks are enabled.
+        viewModel.checkForUpdates(force = true)
         // Only acts while nothing is connected, which is the whole point: the
         // address without the tunnel can only be read when there is no tunnel.
         viewModel.captureRealAddressIfIdle()
@@ -327,6 +331,8 @@ class MainActivity : ComponentActivity() {
                 WhiteAestherApp(
                     settings = settings,
                     engineStatus = viewModel.engineStatus.collectAsStateWithLifecycle().value,
+                    hotPingMs = viewModel.hotPingMs.collectAsStateWithLifecycle().value,
+                    onRefreshHotPing = viewModel::refreshHotPing,
                     endpointScannerState = viewModel.endpointScannerState.collectAsStateWithLifecycle().value,
                     chainState = viewModel.chainState.collectAsStateWithLifecycle().value,
                     nativeVersion = com.whitedns.whiteaesther.core.NativeAetherBridge.versionOrNull(),
@@ -372,6 +378,8 @@ class MainActivity : ComponentActivity() {
                     traffic = viewModel.traffic.collectAsStateWithLifecycle().value,
                     subscriptionUsage = viewModel.subscriptionUsage.collectAsStateWithLifecycle().value,
                     update = viewModel.update.collectAsStateWithLifecycle().value,
+                    updateCheckState = viewModel.updateCheckState.collectAsStateWithLifecycle().value,
+                    onCheckUpdates = { viewModel.checkForUpdates(force = true, userRequested = true) },
                     onLiftBlock = { AetherVpnService.liftBlock(this) },
                     onOpenUpdate = ::openReleasePage,
                     updateDownload = viewModel.updateDownload.collectAsStateWithLifecycle().value,

@@ -91,6 +91,7 @@ class SettingsRepository(private val context: Context) {
             themeMode = enumValueOrDefault(preferences[THEME_MODE], ThemeMode.SYSTEM),
             language = enumValueOrDefault(preferences[LANGUAGE], AppLanguage.SYSTEM),
             showAdvanced = preferences[SHOW_ADVANCED] ?: false,
+            automaticUpdateChecks = preferences[AUTOMATIC_UPDATE_CHECKS] ?: true,
             fragmentTls = preferences[FRAGMENT_TLS] ?: false,
             encryptedHello = preferences[ENCRYPTED_HELLO] ?: false,
             tlsOptions = TlsOptions.decode(preferences[TLS_OPTIONS]),
@@ -150,6 +151,7 @@ class SettingsRepository(private val context: Context) {
             preferences[THEME_MODE] = settings.themeMode.name
             preferences[LANGUAGE] = settings.language.name
             preferences[SHOW_ADVANCED] = settings.showAdvanced
+            preferences[AUTOMATIC_UPDATE_CHECKS] = settings.automaticUpdateChecks
             preferences[FRAGMENT_TLS] = settings.fragmentTls
             preferences[ENCRYPTED_HELLO] = settings.encryptedHello
             preferences[TLS_OPTIONS] = settings.tlsOptions.encode()
@@ -241,6 +243,7 @@ class SettingsRepository(private val context: Context) {
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val LANGUAGE = stringPreferencesKey("language")
         val SHOW_ADVANCED = booleanPreferencesKey("show_advanced")
+        val AUTOMATIC_UPDATE_CHECKS = booleanPreferencesKey("automatic_update_checks")
         val FRAGMENT_TLS = booleanPreferencesKey("fragment_tls")
         val ENCRYPTED_HELLO = booleanPreferencesKey("encrypted_hello")
         val TLS_OPTIONS = stringPreferencesKey("tls_options")

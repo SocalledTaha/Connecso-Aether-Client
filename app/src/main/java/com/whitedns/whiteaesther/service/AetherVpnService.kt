@@ -296,6 +296,7 @@ class AetherVpnService : VpnService() {
     private var notificationPing: Job? = null
     private var notificationPingMs: Long? = null
     private var notificationPingBusy = false
+    private val hotPingWarmedUrls = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private var notificationCountry = ""
 
     /**
@@ -2489,6 +2490,8 @@ class AetherVpnService : VpnService() {
             notificationCountry,
         )
         notificationPingMs = null
+        hotPingWarmedUrls.clear()
+        EngineStatusStore.updateHotPing(null)
         publish(
             EngineStatus(
                 EngineStage.CONNECTED,
@@ -3304,10 +3307,11 @@ class AetherVpnService : VpnService() {
                 notificationPingBusy = true
                 notificationPingMs = null
                 updateNotification(mode, text)
-                val measured = withContext(Dispatchers.IO) { measureLiveRoutePing() }
+                val measured = withContext(Dispatchers.IO) { measureConnectionHotPing() }
                 notificationPingBusy = false
                 if (sessionGeneration != generation || EngineStatusStore.status.value.stage != EngineStage.CONNECTED) return@launch
                 notificationPingMs = measured
+                EngineStatusStore.updateHotPing(measured)
                 updateNotification(mode, text)
                 delay(NOTIFICATION_PING_MS)
             }
@@ -3323,11 +3327,88 @@ class AetherVpnService : VpnService() {
         notificationPingMs = null
         updateNotification(mode, status.message)
         serviceScope.launch {
-            val measured = withContext(Dispatchers.IO) { measureLiveRoutePing() }
+            val measured = withContext(Dispatchers.IO) { measureConnectionHotPing() }
             notificationPingBusy = false
             if (sessionGeneration != generation || EngineStatusStore.status.value.stage != EngineStage.CONNECTED) return@launch
             notificationPingMs = measured
+            EngineStatusStore.updateHotPing(measured)
             updateNotification(mode, status.message)
+        }
+    }
+
+    /**
+     * The 0.2.0 mobile client's keepalive hot ping: HEAD to Google's 204 URL
+     * through the active local SOCKS route, discard one cold sample, then show
+     * warm time-to-first-byte. A slow warm outlier gets one retry and the
+     * faster successful warm sample is retained. This value is display-only.
+     */
+    private fun measureConnectionHotPing(): Long? {
+        val status = EngineStatusStore.status.value
+        if (status.stage != EngineStage.CONNECTED) return null
+
+        // The destination chain owns its own proxy controller. Keep using its
+        // measured selected-node delay rather than accidentally probing the
+        // underlying carrier socket and showing the wrong hop.
+        val activeChain = runCatching { ChainSettings.decode(chainJson) }.getOrNull()
+        if (activeChain?.enabled == true && activeChain.hasNodes) {
+            // This loopback listener is owned by mihomo and selects the same
+            // current exit as device traffic. Measuring through the carrier's
+            // SOCKS port here would skip the destination node entirely.
+            measureHotPingAtPort(ChainConfig.HOT_PING_PORT)?.let { return it }
+            return measureLiveRoutePing()
+        }
+
+        val port = status.carrierSocksPort ?: runCatching {
+            JSONObject(baseConfigJson.orEmpty()).optInt("listenPort", DEFAULT_SOCKS_PORT)
+        }.getOrDefault(DEFAULT_SOCKS_PORT)
+        return measureHotPingAtPort(port)
+    }
+
+    private fun measureHotPingAtPort(port: Int): Long? {
+        if (port !in 1..65535) return null
+        // Prefer a nearby Cloudflare edge. Google remains a fallback and a
+        // second real route sample; show the faster successful warm TTFB so a
+        // distant Google edge does not dominate an otherwise healthy route.
+        val samples = HOT_PING_URLS.mapNotNull { endpoint ->
+            if (hotPingWarmedUrls.add(endpoint)) {
+                val warmup = measureSocksHead(port, endpoint)
+                if (warmup == null || warmup <= 0L) {
+                    hotPingWarmedUrls.remove(endpoint)
+                    return@mapNotNull null
+                }
+                // The old client discarded its cold setup sample.
+            }
+            val first = measureSocksHead(port, endpoint) ?: return@mapNotNull null
+            if (first >= HOT_PING_OUTLIER_RETRY_MS) {
+                val retry = measureSocksHead(port, endpoint)
+                if (retry != null && retry < first) retry else first
+            } else first
+        }
+        return samples.minOrNull()
+    }
+
+    private fun measureSocksHead(port: Int, endpoint: String): Long? {
+        var connection: HttpURLConnection? = null
+        return try {
+            val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", port))
+            val started = android.os.SystemClock.elapsedRealtime()
+            connection = URL(endpoint).openConnection(proxy) as HttpURLConnection
+            connection.connectTimeout = HOT_PING_TIMEOUT_MS
+            connection.readTimeout = HOT_PING_TIMEOUT_MS
+            connection.instanceFollowRedirects = false
+            connection.useCaches = true
+            connection.requestMethod = "HEAD"
+            connection.setRequestProperty("Connection", "keep-alive")
+            val response = connection.responseCode
+            val elapsed = android.os.SystemClock.elapsedRealtime() - started
+            // Drain the response so HttpURLConnection can return the warmed
+            // socket to its keep-alive pool, matching the original mobile probe.
+            runCatching { connection.inputStream.use { it.read() } }
+            if (response in 200..499 && elapsed in 1 until HOT_PING_MAX_VALID_MS) elapsed else null
+        } catch (_: Exception) {
+            null
+        } finally {
+            connection?.disconnect()
         }
     }
 
@@ -3409,6 +3490,14 @@ class AetherVpnService : VpnService() {
     }
 
     companion object {
+        private val HOT_PING_URLS = listOf(
+            "https://cp.cloudflare.com/generate_204",
+            "https://www.google.com/generate_204",
+        )
+        private const val HOT_PING_TIMEOUT_MS = 8_000
+        private const val HOT_PING_OUTLIER_RETRY_MS = 500L
+        private const val HOT_PING_MAX_VALID_MS = 10_000L
+
         /** Cloudflare's cap on MASQUE. Not ours to raise. */
         private const val MASQUE_MTU = 1280
 
