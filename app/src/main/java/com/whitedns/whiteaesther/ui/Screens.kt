@@ -79,6 +79,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.whitedns.whiteaesther.AddressPair
 import com.whitedns.whiteaesther.ChainState
+import com.whitedns.whiteaesther.SpeedTestState
 import com.whitedns.whiteaesther.core.ChainNode
 import com.whitedns.whiteaesther.EndpointOperation
 import com.whitedns.whiteaesther.BridgeMessage
@@ -320,7 +321,6 @@ fun HomeScreen(
     onDismissUpdate: () -> Unit,
     onToggleConnection: () -> Unit,
     onGoToRoutes: () -> Unit,
-    onGoToChain: () -> Unit = {},
     onGoToEndpoint: () -> Unit,
     onGoToTraffic: () -> Unit,
     onSettingsChange: (AppSettings) -> Unit = {},
@@ -330,6 +330,8 @@ fun HomeScreen(
     onLoadChainNodes: () -> Unit = {},
     onSelectChainNode: (String) -> Unit = {},
     onTestChainNodesSelected: (List<String>) -> Unit = {},
+    speedTest: SpeedTestState = SpeedTestState(),
+    onSpeedTest: () -> Unit = {},
     connectModifier: Modifier = Modifier,
     compact: Boolean = false,
 ) {
@@ -415,6 +417,27 @@ fun HomeScreen(
                 },
             )
             if (status.stage == EngineStage.CONNECTED) {
+                OutlineButton(
+                    text = stringResource(if (speedTest.running) R.string.speed_test_running else R.string.speed_test),
+                    modifier = Modifier.testTag("home-speed-test"),
+                    enabled = !speedTest.running,
+                    icon = AetherIcons.Pulse,
+                    onClick = onSpeedTest,
+                )
+                when {
+                    speedTest.mbps != null && speedTest.seconds != null -> Text(
+                        stringResource(R.string.speed_test_result, speedTest.mbps, speedTest.seconds),
+                        style = AetherTheme.type.Small,
+                        color = colors.text2,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    )
+                    speedTest.error != null -> Text(
+                        stringResource(R.string.speed_test_failed, speedTest.error),
+                        style = AetherTheme.type.Small,
+                        color = colors.signalFailed,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    )
+                }
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
@@ -479,6 +502,7 @@ fun HomeScreen(
                     value = destinationValue,
                     tag = "home-destination",
                     forceStacked = true,
+                    enabled = status.stage == EngineStage.CONNECTED,
                     onClick = { destinationDialog = true },
                 )
             }
@@ -551,10 +575,10 @@ fun HomeScreen(
                 )
             }
         }
-        SubscriptionUsageCard(
+        ActivationCodeBar(
             settings = settings,
-            usage = subscriptionUsage,
-            onClick = onGoToChain,
+            connected = status.stage == EngineStage.CONNECTED,
+            onSettingsChange = onSettingsChange,
             onRefresh = {
                 onRefreshSubscriptionUsage()
                 if (status.stage == EngineStage.CONNECTED) onRefreshChainNodes()
@@ -573,10 +597,6 @@ fun HomeScreen(
                     destinationDialog = false
                 },
                 onPing = onTestChainNodesSelected,
-                onSubscriptions = {
-                    destinationDialog = false
-                    onGoToChain()
-                },
                 onDismiss = { destinationDialog = false },
             )
         }
@@ -861,6 +881,100 @@ private fun ConnecsoConnectionButton(
 }
 
 @Composable
+private fun ActivationCodeBar(
+    settings: AppSettings,
+    connected: Boolean,
+    onSettingsChange: (AppSettings) -> Unit,
+    onRefresh: () -> Unit,
+) {
+    val colors = AetherTheme.colors
+    val savedCode = settings.chain.activationCode
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    var draft by rememberSaveable(savedCode) { mutableStateOf(savedCode) }
+    val valid = draft.trim().matches(Regex("[A-Za-z0-9_-]{4,128}"))
+
+    AetherCard(modifier = Modifier.testTag("home-activation-code")) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(9.dp),
+        ) {
+            Icon(AetherIcons.Key, null, Modifier.size(18.dp), colors.brand)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(stringResource(R.string.activation_code), style = AetherTheme.type.RowTitle, color = colors.text)
+                Text(
+                    if (savedCode.isNotBlank()) stringResource(R.string.activation_code_active, savedCode.takeLast(4))
+                    else stringResource(R.string.activation_code_no_code),
+                    style = AetherTheme.type.Small,
+                    color = colors.text2,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (savedCode.isNotBlank() && connected) {
+                IconButton(onClick = onRefresh, modifier = Modifier.size(34.dp)) {
+                    Icon(AetherIcons.Refresh, stringResource(R.string.refresh_destinations), Modifier.size(17.dp), colors.brand)
+                }
+            }
+            OutlineButton(
+                text = stringResource(if (savedCode.isBlank()) R.string.activation_code_enter else R.string.activation_code_change),
+                modifier = Modifier.testTag("home-activation-code-toggle"),
+                onClick = { expanded = !expanded },
+            )
+        }
+        if (expanded) {
+            Divider()
+            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp)) {
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = { draft = it.filterNot(Char::isWhitespace).take(128) },
+                    modifier = Modifier.fillMaxWidth().testTag("home-activation-code-field"),
+                    placeholder = { Text(stringResource(R.string.enter_activation_code)) },
+                    textStyle = AetherTheme.type.Data.copy(color = colors.text),
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = colors.ink1,
+                        unfocusedContainerColor = colors.ink1,
+                    ),
+                )
+                if (draft.isNotBlank() && !valid) Note(stringResource(R.string.activation_code_invalid))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    PrimaryButton(
+                        text = stringResource(R.string.activate_code),
+                        modifier = Modifier.weight(1f).testTag("home-activation-code-apply"),
+                        enabled = valid && draft.trim() != savedCode,
+                        onClick = {
+                            val updated = runCatching { settings.chain.withActivationCode(draft) }.getOrNull() ?: return@PrimaryButton
+                            onSettingsChange(settings.copy(chain = updated))
+                            expanded = false
+                        },
+                    )
+                    if (savedCode.isNotBlank()) {
+                        OutlineButton(
+                            text = stringResource(R.string.activation_code_remove),
+                            modifier = Modifier.weight(1f),
+                            onClick = {
+                                onSettingsChange(settings.copy(chain = settings.chain.withActivationCode("")))
+                                draft = ""
+                                expanded = false
+                            },
+                        )
+                    }
+                }
+                Text(
+                    stringResource(R.string.activation_code_description),
+                    style = AetherTheme.type.Small,
+                    color = colors.text3,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun SubscriptionUsageCard(
     settings: AppSettings,
     usage: SubscriptionUsage?,
@@ -969,16 +1083,20 @@ private fun DestinationDialog(
     onLoad: () -> Unit,
     onSelect: (String) -> Unit,
     onPing: (List<String>) -> Unit,
-    onSubscriptions: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val colors = AetherTheme.colors
+    val screenHeight = LocalConfiguration.current.screenHeightDp.dp
+    val countryGroups = remember(chainState.nodes) {
+        chainState.nodes.groupBy { nodeCountryCode(it.name) }
+            .toSortedMap(compareBy<String?> { it == null }.thenBy { countryDisplayName(it) })
+    }
     Dialog(onDismissRequest = onDismiss) {
         AetherCard(
             modifier = Modifier
-                .fillMaxWidth()
+                .fillMaxWidth(0.94f)
                 .widthIn(max = 460.dp)
-                .heightIn(max = 650.dp),
+                .heightIn(max = (screenHeight * 0.80f).coerceAtMost(650.dp)),
         ) {
             Row(
                 Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 12.dp),
@@ -1005,6 +1123,15 @@ private fun DestinationDialog(
                         else stringResource(R.string.ping_all),
                     )
                 }
+                if (settings.chain.hasNodes) {
+                    IconButton(
+                        onClick = onRefresh,
+                        enabled = !chainState.busy,
+                        modifier = Modifier.size(34.dp),
+                    ) {
+                        Icon(AetherIcons.Refresh, stringResource(R.string.refresh_destinations), Modifier.size(17.dp), colors.brand)
+                    }
+                }
                 Text(
                     "×",
                     style = AetherTheme.type.PageTitle,
@@ -1014,7 +1141,7 @@ private fun DestinationDialog(
             }
             Divider()
             LazyColumn(
-                Modifier.fillMaxWidth().heightIn(max = 440.dp),
+                Modifier.fillMaxWidth().heightIn(max = screenHeight * 0.57f),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 7.dp),
             ) {
                 item {
@@ -1039,41 +1166,57 @@ private fun DestinationDialog(
                         )
                     }
                 }
-                items(chainState.nodes, key = { it.name }) { node ->
-                    DestinationNodeOption(
-                        node = node,
-                        selected = selected == node.name,
-                        enabled = !chainState.busy && node.supported,
-                        pinging = chainState.testProgress != null,
-                        onChoose = { onSelect(node.name) },
-                        onPing = { onPing(listOf(node.name)) },
-                    )
+                countryGroups.forEach { (countryCode, nodes) ->
+                    item(key = "country-${countryCode ?: "other"}") {
+                        Row(
+                            Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(7.dp),
+                        ) {
+                            Text(countryCode?.let(::countryFlagEmoji) ?: "🌐", style = AetherTheme.type.Data)
+                            Text(
+                                countryDisplayName(countryCode),
+                                style = AetherTheme.type.Small,
+                                color = colors.text2,
+                            )
+                        }
+                    }
+                    items(nodes, key = { "${countryCode ?: "other"}-${it.name}" }) { node ->
+                        DestinationNodeOption(
+                            node = node,
+                            selected = selected == node.name,
+                            enabled = !chainState.busy && node.supported,
+                            pinging = chainState.testProgress != null,
+                            onChoose = { onSelect(node.name) },
+                            onPing = { onPing(listOf(node.name)) },
+                        )
+                    }
                 }
-            }
-            Divider()
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 11.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                if (settings.chain.hasNodes) {
-                    OutlineButton(
-                        text = stringResource(R.string.refresh),
-                        modifier = Modifier.weight(1f),
-                        enabled = !chainState.busy,
-                        icon = AetherIcons.Refresh,
-                        onClick = onRefresh,
-                    )
-                }
-                OutlineButton(
-                    text = stringResource(R.string.activation_code),
-                    modifier = Modifier.weight(1f),
-                    icon = AetherIcons.Routes,
-                    onClick = onSubscriptions,
-                )
             }
         }
     }
 }
+
+private fun nodeCountryCode(name: String): String? {
+    val iso = java.util.Locale.getISOCountries().toSet()
+    val code = Regex("(?:^|[\\s|_:/-])([A-Za-z]{2})(?=$|[\\s|_:/-])")
+        .find(name)?.groupValues?.getOrNull(1)?.uppercase(java.util.Locale.ROOT)
+    if (code != null && code in iso) return code
+    val normalized = name.lowercase(java.util.Locale.ROOT)
+    return iso.firstOrNull { country ->
+        val label = java.util.Locale("", country).getDisplayCountry(java.util.Locale.ENGLISH).lowercase(java.util.Locale.ROOT)
+        label.isNotBlank() && normalized.contains(label)
+    }
+}
+
+private fun countryDisplayName(code: String?): String = code?.let {
+    java.util.Locale("", it).getDisplayCountry(java.util.Locale.getDefault()).ifBlank { it }
+} ?: "Other locations"
+
+private fun countryFlagEmoji(code: String): String = code.uppercase(java.util.Locale.ROOT)
+    .take(2)
+    .map { char -> String(Character.toChars(0x1F1E6 + char.code - 'A'.code)) }
+    .joinToString("")
 
 @Composable
 private fun DestinationOption(
@@ -1134,7 +1277,7 @@ private fun DestinationNodeOption(
             Column(Modifier.weight(1f)) {
                 Text(node.name, style = AetherTheme.type.RowTitle, color = colors.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
-                    node.delay?.let { "$it ms · ${node.kind}" } ?: node.kind,
+                node.delay?.let { stringResource(R.string.rtt_value, it) + " · ${node.kind}" } ?: node.kind,
                     style = AetherTheme.type.Small,
                     color = colors.text2,
                     maxLines = 1,
@@ -1311,7 +1454,6 @@ fun RoutesScreen(
     settings: AppSettings,
     onSettingsChange: (AppSettings) -> Unit,
     onGoToEndpoint: () -> Unit,
-    onGoToChain: () -> Unit = {},
     onGoToRoutingRules: () -> Unit = {},
     onFetchBridges: (String) -> Unit = {},
     bridgesFetching: Boolean = false,
@@ -1319,7 +1461,6 @@ fun RoutesScreen(
     detectedCountry: String = "",
     psiphonRegions: List<String> = emptyList(),
     endpointModifier: Modifier = Modifier,
-    chainModifier: Modifier = Modifier,
     routingRulesModifier: Modifier = Modifier,
 ) {
     var advanced by rememberSaveable { mutableStateOf(settings.showAdvanced) }
@@ -1668,20 +1809,6 @@ fun RoutesScreen(
                 modifier = endpointModifier.testTag("routes-endpoint"),
                 onClick = onGoToEndpoint,
             )
-            Divider()
-            RowCard(
-                icon = AetherIcons.Globe,
-                title = stringResource(R.string.exit_chain),
-                subtitle = settings.chainSummary(),
-                iconTint = AetherTheme.colors.brand,
-                modifier = chainModifier.testTag("routes-chain"),
-                onClick = onGoToChain,
-            )
-            if (settings.chain.enabled && !settings.chain.hasNodes) {
-                Column(Modifier.padding(13.dp)) {
-                    Note(stringResource(R.string.empty_exit_chain_hint))
-                }
-            }
             Divider()
             RowCard(
                 icon = AetherIcons.Routes,
@@ -2092,7 +2219,6 @@ fun TrafficScreen(
     onBack: () -> Unit,
     onSettingsChange: (AppSettings) -> Unit,
     onGoToEndpoint: () -> Unit = {},
-    onGoToChain: () -> Unit = {},
     onGoToRoutingRules: () -> Unit = {},
 ) {
     var advanced by rememberSaveable { mutableStateOf(settings.showAdvanced) }
@@ -2117,9 +2243,6 @@ fun TrafficScreen(
             RowCard(AetherIcons.Radar, stringResource(R.string.home_scan_endpoints),
                 stringResource(R.string.home_scan_endpoints_summary),
                 modifier = Modifier.testTag("tools-endpoint"), onClick = onGoToEndpoint)
-            Divider()
-            RowCard(AetherIcons.Globe, stringResource(R.string.exit_chain), settings.chainSummary(),
-                modifier = Modifier.testTag("tools-chain"), onClick = onGoToChain)
             Divider()
             RowCard(AetherIcons.Routes, stringResource(R.string.routing_rules), settings.routingSummary(),
                 modifier = Modifier.testTag("tools-routing-rules"), onClick = onGoToRoutingRules)

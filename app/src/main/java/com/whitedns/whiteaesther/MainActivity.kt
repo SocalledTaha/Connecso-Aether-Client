@@ -357,6 +357,8 @@ class MainActivity : ComponentActivity() {
                     onTestChainNodes = { viewModel.testChainNodes() },
                     onTestChainNodesSelected = { viewModel.testChainNodes(it) },
                     onCancelChainTests = viewModel::cancelChainTests,
+                    speedTest = viewModel.speedTest.collectAsStateWithLifecycle().value,
+                    onSpeedTest = viewModel::runSpeedTest,
                     identityMessage = viewModel.identityMessage.collectAsStateWithLifecycle().value,
                     onExportIdentity = ::exportIdentity,
                     onImportIdentity = {

@@ -28,6 +28,13 @@ class ChainController(private val context: Context) {
 
     val isAvailable: Boolean get() = NativeChainBridge.isAvailable
 
+    /** Local SOCKS port that represents the live end-to-end route for measurements. */
+    fun measurementSocksPort(carrierPort: Int?): Int? = when {
+        applied != null -> ChainConfig.HOT_PING_PORT
+        activeSocksPort != null -> activeSocksPort
+        else -> carrierPort
+    }
+
     /**
      * Applies the configuration and attaches [tunFd].
      *
@@ -343,7 +350,11 @@ class ChainController(private val context: Context) {
                 "asyncTestDelay",
                 JSONObject()
                     .put("proxy-name", node)
-                    .put("test-url", "http://www.gstatic.com/generate_204")
+                    // Measure a real TLS HTTP round trip, matching the RTT probe
+                    // used by the Windows client. The old cleartext endpoint
+                    // only measured an HTTP health check and understated or
+                    // misrepresented latency on some routes.
+                    .put("test-url", "https://www.google.com/generate_204")
                     .put("timeout", DELAY_TEST_TIMEOUT_MS),
             )
         }
@@ -437,7 +448,7 @@ class ChainController(private val context: Context) {
             "setupConfig",
             JSONObject()
                 .put("selected-map", JSONObject())
-                .put("test-url", "http://www.gstatic.com/generate_204"),
+                .put("test-url", "https://www.google.com/generate_204"),
         )
         return reply.failureText()?.let { "The chain rejected its configuration: $it" }
     }

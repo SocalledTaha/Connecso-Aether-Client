@@ -56,6 +56,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.net.HttpURLConnection
+import java.net.InetSocketAddress
+import java.net.Proxy
+import java.net.URL
 
 /**
  * Something the bridge fetch has to say, and whether it is a fault.
@@ -133,6 +137,13 @@ data class AddressPair(
     val tunnel: String? = null,
 )
 
+data class SpeedTestState(
+    val running: Boolean = false,
+    val mbps: Double? = null,
+    val seconds: Double? = null,
+    val error: String? = null,
+)
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * A string resource, in whatever language the app is set to.
@@ -175,11 +186,67 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     val engineStatus = EngineStatusStore.status
     val hotPingMs = EngineStatusStore.hotPingMs
+    private val mutableSpeedTest = MutableStateFlow(SpeedTestState())
+    val speedTest = mutableSpeedTest.asStateFlow()
 
     fun refreshHotPing() {
         if (EngineStatusStore.status.value.stage != EngineStage.CONNECTED) return
         runCatching {
             getApplication<Application>().startService(AetherVpnService.pingIntent(getApplication()))
+        }
+    }
+
+    /** Downloads a measured payload through the live route, matching desktop speed test behavior. */
+    fun runSpeedTest() {
+        if (mutableSpeedTest.value.running) return
+        viewModelScope.launch {
+            mutableSpeedTest.value = SpeedTestState(running = true)
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    val status = EngineStatusStore.status.value
+                    check(status.stage == EngineStage.CONNECTED) { "Connect before running a speed test." }
+                    val port = chain.measurementSocksPort(status.carrierSocksPort)
+                        ?: error("The active route has no local SOCKS endpoint.")
+                    require(port in 1..65535) { "The active route returned an invalid SOCKS port." }
+
+                    val cacheKey = System.currentTimeMillis()
+                    val url = URL("https://speed.cloudflare.com/__down?bytes=$SPEED_TEST_BYTES&cacheBust=$cacheKey")
+                    val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", port))
+                    val connection = (url.openConnection(proxy) as HttpURLConnection).apply {
+                        connectTimeout = SPEED_TEST_CONNECT_TIMEOUT_MS
+                        readTimeout = SPEED_TEST_READ_TIMEOUT_MS
+                        instanceFollowRedirects = false
+                        useCaches = false
+                        setRequestProperty("Cache-Control", "no-cache")
+                        setRequestProperty("User-Agent", "Connecso-Aether-Client/0.1.3")
+                    }
+                    try {
+                        val response = connection.responseCode
+                        check(response in 200..299) {
+                            if (response == 429) "The speed-test endpoint is rate-limiting requests (HTTP 429)."
+                            else "The speed-test endpoint returned HTTP $response."
+                        }
+                        val started = android.os.SystemClock.elapsedRealtimeNanos()
+                        var total = 0L
+                        val buffer = ByteArray(64 * 1024)
+                        connection.inputStream.use { input ->
+                            while (true) {
+                                val count = input.read(buffer)
+                                if (count < 0) break
+                                total += count
+                            }
+                        }
+                        val seconds = (android.os.SystemClock.elapsedRealtimeNanos() - started) / 1_000_000_000.0
+                        check(total > 0L && seconds > 0.0) { "The speed-test endpoint returned no data." }
+                        SpeedTestState(mbps = total * 8.0 / seconds / 1_000_000.0, seconds = seconds)
+                    } finally {
+                        connection.disconnect()
+                    }
+                }
+            }
+            mutableSpeedTest.value = result.getOrElse {
+                SpeedTestState(error = it.message ?: "The speed test could not complete.")
+            }
         }
     }
     private val mutableEndpointScannerState = MutableStateFlow(EndpointScannerState())
@@ -1178,6 +1245,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private companion object {
+        const val SPEED_TEST_BYTES = 10_000_000
+        const val SPEED_TEST_CONNECT_TIMEOUT_MS = 20_000
+        const val SPEED_TEST_READ_TIMEOUT_MS = 45_000
         /** How often the system downloader is asked where it has got to. */
         const val UPDATE_POLL_MS = 700L
 

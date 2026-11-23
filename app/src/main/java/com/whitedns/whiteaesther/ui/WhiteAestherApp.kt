@@ -58,6 +58,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.whitedns.whiteaesther.AddressPair
 import com.whitedns.whiteaesther.ChainState
+import com.whitedns.whiteaesther.SpeedTestState
 import com.whitedns.whiteaesther.BridgeMessage
 import com.whitedns.whiteaesther.EndpointScannerState
 import com.whitedns.whiteaesther.IdentityMessage
@@ -88,7 +89,6 @@ private enum class Destination(val tab: Tab?) {
     HOME(Tab.HOME),
     ROUTES(Tab.ROUTES),
     ENDPOINT(Tab.ROUTES),
-    CHAIN(Tab.ROUTES),
     ROUTING_RULES(Tab.ROUTES),
     TRAFFIC(Tab.TRAFFIC),
     SPLIT_TUNNEL(Tab.TRAFFIC),
@@ -127,6 +127,8 @@ fun WhiteAestherApp(
     onSelectChainNode: (String) -> Unit = {},
     onTestChainNodes: () -> Unit = {},
     onTestChainNodesSelected: (List<String>) -> Unit = {},
+    speedTest: SpeedTestState = SpeedTestState(),
+    onSpeedTest: () -> Unit = {},
     onCancelChainTests: () -> Unit = {},
     identityMessage: IdentityMessage? = null,
     onExportIdentity: () -> Unit = {},
@@ -175,7 +177,6 @@ fun WhiteAestherApp(
     val inputModeManager = LocalInputModeManager.current
     val connectFocus = remember { FocusRequester() }
     val endpointFocus = remember { FocusRequester() }
-    val chainFocus = remember { FocusRequester() }
     val rulesFocus = remember { FocusRequester() }
     val appsFocus = remember { FocusRequester() }
     val identityFocus = remember { FocusRequester() }
@@ -278,7 +279,6 @@ fun WhiteAestherApp(
                             }
                         },
                         onGoToRoutes = { openDetail(Destination.ROUTES) },
-                        onGoToChain = { openDetail(Destination.CHAIN) },
                         onGoToEndpoint = {
                             openDetail(Destination.ENDPOINT)
                         },
@@ -290,6 +290,8 @@ fun WhiteAestherApp(
                         onLoadChainNodes = onLoadChainNodes,
                         onSelectChainNode = onSelectChainNode,
                         onTestChainNodesSelected = onTestChainNodesSelected,
+                        speedTest = speedTest,
+                        onSpeedTest = onSpeedTest,
                         connectModifier = Modifier.focusRequester(connectFocus),
                         compact = isTelevision,
                     )
@@ -299,7 +301,6 @@ fun WhiteAestherApp(
                         onGoToEndpoint = {
                             openDetail(Destination.ENDPOINT, endpointFocus)
                         },
-                        onGoToChain = { openDetail(Destination.CHAIN, chainFocus) },
                         onGoToRoutingRules = {
                             openDetail(Destination.ROUTING_RULES, rulesFocus)
                         },
@@ -309,22 +310,7 @@ fun WhiteAestherApp(
                         detectedCountry = detectedCountry,
                         psiphonRegions = psiphonRegions,
                         endpointModifier = Modifier.focusRequester(endpointFocus),
-                        chainModifier = Modifier.focusRequester(chainFocus),
                         routingRulesModifier = Modifier.focusRequester(rulesFocus),
-                    )
-                    Destination.CHAIN -> ChainScreen(
-                        settings = settings,
-                        status = engineStatus,
-                        chainState = chainState,
-                        onSettingsChange = onSettingsChange,
-                        onRefreshNodes = onRefreshChainNodes,
-                        onRefreshSource = onRefreshChainSource,
-                        onLoadNodes = onLoadChainNodes,
-                        onSelectNode = onSelectChainNode,
-                        onTestNodes = onTestChainNodes,
-                        onTestSelected = onTestChainNodesSelected,
-                        onCancelTests = onCancelChainTests,
-                        onBack = ::goBack,
                     )
                     Destination.ENDPOINT -> EndpointScreen(
                         settings = settings,
@@ -343,7 +329,6 @@ fun WhiteAestherApp(
                         onBack = ::goBack,
                         onSettingsChange = onSettingsChange,
                         onGoToEndpoint = { openDetail(Destination.ENDPOINT) },
-                        onGoToChain = { openDetail(Destination.CHAIN) },
                         onGoToRoutingRules = { openDetail(Destination.ROUTING_RULES) },
                     )
                     Destination.SPLIT_TUNNEL -> SplitTunnelScreen(
