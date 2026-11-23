@@ -453,7 +453,7 @@ class AutoPlannerTest {
     fun automaticDoesNotInheritAHandTunedSearch() {
         for (slow in listOf("thorough", "stealth", "ironclad")) {
             val read = org.json.JSONObject(AutoPlanner.automaticBase("""{"scanMode":"$slow"}"""))
-            assertEquals("balanced", read.getString("scanMode"))
+            assertEquals("turbo", read.getString("scanMode"))
         }
         for (fits in listOf("turbo", "balanced")) {
             val read = org.json.JSONObject(AutoPlanner.automaticBase("""{"scanMode":"$fits"}"""))

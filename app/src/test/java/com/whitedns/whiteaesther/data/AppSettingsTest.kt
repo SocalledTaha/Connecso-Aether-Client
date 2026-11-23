@@ -14,9 +14,9 @@ class AppSettingsTest {
 
         assertEquals(EngineMode.TUN, settings.mode)
         assertEquals(1819, settings.proxyPort)
-        // Automatic, because which framing works depends on the network and
-        // the user has no way to know it.
-        assertEquals(TunnelProtocol.AUTO, settings.transport)
+        // The requested default is MASQUE H2 with the fast Turbo search.
+        assertEquals(TunnelProtocol.H2, settings.transport)
+        assertEquals(ScanStrategy.TURBO, settings.scanStrategy)
         assertTrue(settings.dualStack)
         assertTrue(settings.validationEnabled)
         assertEquals(EndpointMode.AUTOMATIC, settings.endpointMode)

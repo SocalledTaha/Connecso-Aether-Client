@@ -60,13 +60,10 @@ class ChainSettingsTest {
         val original = ChainSettings(
             enabled = true,
             throughTunnel = false,
-            sources = listOf(
-                ChainSource("One", "https://one.invalid/sub#token", true),
-                ChainSource("Two", "https://two.invalid/sub", false),
-            ),
-            manual = "vless://example\ntrojan://example",
-            node = "tokyo-01",
-        )
+            routeBlock = "private.example",
+            routeDirect = "local.example",
+            hiddenNodes = listOf("old-node"),
+        ).withActivationCode("test-code").copy(node = "tokyo-01")
 
         assertEquals(original, ChainSettings.decode(original.encode()))
     }
@@ -82,12 +79,15 @@ class ChainSettingsTest {
     }
 
     @Test
-    fun aSourceWithoutAUrlIsDropped() {
+    fun invalidSourcesAreDroppedAndActivationSourceIsRebuilt() {
         val decoded = ChainSettings.decode(
-            """{"enabled":true,"sources":[{"name":"Broken"},{"name":"Fine","url":"https://ok.invalid"}]}""",
+            """{"enabled":true,"sources":[{"name":"Broken"},{"name":"Fine","url":"https://portal.ctenglisheducation.ir:2096/kcdqxjoahx9j8bjk/good-code"}]}""",
         )
 
         assertEquals(1, decoded.sources.size)
-        assertEquals("https://ok.invalid", decoded.sources.single().url)
+        assertEquals(
+            "https://portal.ctenglisheducation.ir:2096/kcdqxjoahx9j8bjk/good-code",
+            decoded.sources.single().url,
+        )
     }
 }
