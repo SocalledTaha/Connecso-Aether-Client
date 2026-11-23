@@ -461,7 +461,7 @@ private fun FamilyHeader(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Image(
-                painterResource(R.drawable.connecso_windows_icon), null,
+                painterResource(R.drawable.whiteaesther_logo), null,
                 Modifier.size(42.dp),
             )
             Text(
