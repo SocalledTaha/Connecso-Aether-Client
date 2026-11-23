@@ -59,6 +59,8 @@ data class ChainSettings(
      */
     val throughTunnel: Boolean = true,
     val sources: List<ChainSource> = emptyList(),
+    /** User-facing access code; its subscription endpoint is composed locally. */
+    val activationCode: String = "",
     /** The source highlighted as currently active in subscription controls. */
     val activeSubscriptionUrl: String? = null,
     /** The source selected by default when the user opens destination choices. */
@@ -88,6 +90,32 @@ data class ChainSettings(
      */
     val hiddenNodes: List<String> = emptyList(),
 ) {
+    fun withActivationCode(raw: String): ChainSettings {
+        val code = raw.trim()
+        if (code.isEmpty()) {
+            return copy(
+                activationCode = "",
+                sources = emptyList(),
+                activeSubscriptionUrl = null,
+                defaultSubscriptionUrl = null,
+                manual = "",
+                node = null,
+                hiddenNodes = emptyList(),
+            )
+        }
+        require(isValidActivationCode(code))
+        val url = ACTIVATION_SUBSCRIPTION_PREFIX + code
+        return copy(
+            activationCode = code,
+            sources = listOf(ChainSource("Activation code", url)),
+            activeSubscriptionUrl = url,
+            defaultSubscriptionUrl = url,
+            manual = "",
+            node = null,
+            hiddenNodes = emptyList(),
+        )
+    }
+
     fun preferredSubscription(): ChainSource? =
         sources.firstOrNull { it.enabled && it.url == activeSubscriptionUrl }
             ?: sources.firstOrNull { it.enabled && it.url == defaultSubscriptionUrl }
@@ -152,6 +180,7 @@ data class ChainSettings(
     fun encode(): String = JSONObject()
         .put("enabled", enabled)
         .put("throughTunnel", throughTunnel)
+        .put("activationCode", activationCode)
         .put("sources", JSONArray().apply { sources.forEach { put(it.toJson()) } })
         .put("activeSubscriptionUrl", activeSubscriptionUrl ?: JSONObject.NULL)
         .put("defaultSubscriptionUrl", defaultSubscriptionUrl ?: JSONObject.NULL)
@@ -168,17 +197,20 @@ data class ChainSettings(
             return runCatching {
                 val json = JSONObject(raw)
                 val sources = json.optJSONArray("sources")
+                val code = json.optString("activationCode").takeIf(::isValidActivationCode)
+                    ?: (0 until (sources?.length() ?: 0)).asSequence()
+                        .mapNotNull { sources?.optJSONObject(it)?.optString("url") }
+                        .mapNotNull(::activationCodeFromUrl)
+                        .firstOrNull()
+                val url = code?.let { ACTIVATION_SUBSCRIPTION_PREFIX + it }
                 ChainSettings(
                     enabled = json.optBoolean("enabled", false),
                     throughTunnel = json.optBoolean("throughTunnel", true),
-                    sources = buildList {
-                        for (index in 0 until (sources?.length() ?: 0)) {
-                            sources?.optJSONObject(index)?.let(ChainSource::fromJson)?.let(::add)
-                        }
-                    },
-                    activeSubscriptionUrl = json.optString("activeSubscriptionUrl").takeIf { it.isNotBlank() && it != "null" },
-                    defaultSubscriptionUrl = json.optString("defaultSubscriptionUrl").takeIf { it.isNotBlank() && it != "null" },
-                    manual = json.optString("manual"),
+                    activationCode = code.orEmpty(),
+                    sources = url?.let { listOf(ChainSource("Activation code", it)) }.orEmpty(),
+                    activeSubscriptionUrl = url,
+                    defaultSubscriptionUrl = url,
+                    manual = "",
                     routeBlock = json.optString("routeBlock"),
                     routeDirect = json.optString("routeDirect"),
                     hiddenNodes = json.optJSONArray("hiddenNodes")?.let { array ->
@@ -193,4 +225,16 @@ data class ChainSettings(
             }.getOrDefault(ChainSettings())
         }
     }
+}
+
+private const val ACTIVATION_SUBSCRIPTION_PREFIX =
+    "https://portal.ctenglisheducation.ir:2096/kcdqxjoahx9j8bjk/"
+
+private fun isValidActivationCode(value: String): Boolean =
+    value.length in 4..128 && value.matches(Regex("[A-Za-z0-9_-]+"))
+
+private fun activationCodeFromUrl(raw: String): String? {
+    val url = raw.trim()
+    if (!url.startsWith(ACTIVATION_SUBSCRIPTION_PREFIX)) return null
+    return url.removePrefix(ACTIVATION_SUBSCRIPTION_PREFIX).takeIf(::isValidActivationCode)
 }

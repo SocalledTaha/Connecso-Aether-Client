@@ -502,20 +502,21 @@ class MainActivity : ComponentActivity() {
         startService(settings)
     }
 
-    /** Hands the report to the system share sheet -- the user picks where it goes. */
+    /** Opens a prefilled issue draft in the project's GitHub repository. */
     private fun shareReport(report: String) {
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(Intent.EXTRA_SUBJECT, "WhiteAesther diagnostics")
-            putExtra(Intent.EXTRA_TEXT, report)
-        }
-        if (intent.resolveActivity(packageManager) == null) {
-            explainUnavailable(getString(R.string.err_no_share_target))
-            return
-        }
+        val issueUrl = Uri.Builder()
+            .scheme("https")
+            .authority("github.com")
+            .appendPath("SocalledTaha")
+            .appendPath("Connecso-Aether-Client")
+            .appendPath("issues")
+            .appendPath("new")
+            .appendQueryParameter("title", "Connecso Aether 0.1.3 bug report")
+            .appendQueryParameter("body", report)
+            .build()
         openExternal(
-            Intent.createChooser(intent, getString(R.string.share_diagnostics)),
-            getString(R.string.err_no_share_target),
+            Intent(Intent.ACTION_VIEW, issueUrl),
+            getString(R.string.err_no_browser),
         )
     }
 
@@ -560,7 +561,7 @@ class MainActivity : ComponentActivity() {
 
     private fun copyReport(report: String) {
         val clipboard = getSystemService(ClipboardManager::class.java) ?: return
-        clipboard.setPrimaryClip(ClipData.newPlainText("WhiteAesther diagnostics", report))
+        clipboard.setPrimaryClip(ClipData.newPlainText("Connecso Aether diagnostics", report))
     }
 
     private fun openExternal(intent: Intent, unavailable: String) {

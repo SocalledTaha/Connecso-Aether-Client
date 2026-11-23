@@ -38,6 +38,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.animation.core.RepeatMode
@@ -876,7 +877,8 @@ private fun SubscriptionUsageCard(
         hasManual -> stringResource(R.string.manual_nodes)
         else -> stringResource(R.string.home_no_subscription)
     }
-    val host = chosenSource?.url?.let { runCatching { java.net.URI(it).host }.getOrNull() }.orEmpty()
+    val shownCode = settings.chain.activationCode.takeIf(String::isNotBlank)
+        ?.let { "••••${it.takeLast(4)}" }.orEmpty()
     val usedBytes = usage?.usedBytes
     val used = usedBytes?.let(::formatBytes) ?: "—"
     val remaining = when {
@@ -938,7 +940,7 @@ private fun SubscriptionUsageCard(
                     maxLines = 1,
                 )
                 Text(
-                    host.ifBlank { sourceTitle },
+                    shownCode.ifBlank { sourceTitle },
                     style = AetherTheme.type.Small,
                     color = colors.text3,
                     maxLines = 1,
@@ -990,6 +992,19 @@ private fun DestinationDialog(
                     color = colors.text,
                     modifier = Modifier.weight(1f),
                 )
+                val pingableNames = remember(chainState.nodes) {
+                    chainState.nodes.filter { it.supported }.map { it.name }
+                }
+                TextButton(
+                    onClick = { onPing(pingableNames) },
+                    enabled = pingableNames.isNotEmpty() && !chainState.busy,
+                ) {
+                    val progress = chainState.testProgress
+                    Text(
+                        if (progress != null) stringResource(R.string.ping_progress, progress.first, progress.second)
+                        else stringResource(R.string.ping_all),
+                    )
+                }
                 Text(
                     "×",
                     style = AetherTheme.type.PageTitle,
@@ -1050,7 +1065,7 @@ private fun DestinationDialog(
                     )
                 }
                 OutlineButton(
-                    text = stringResource(R.string.subscriptions),
+                    text = stringResource(R.string.activation_code),
                     modifier = Modifier.weight(1f),
                     icon = AetherIcons.Routes,
                     onClick = onSubscriptions,
@@ -3191,7 +3206,7 @@ fun DiagnosticsScreen(
                 onClick = { onCopy(report) },
             )
             PrimaryButton(
-                text = stringResource(R.string.send),
+                text = stringResource(R.string.open_bug_report),
                 icon = AetherIcons.Send,
                 modifier = Modifier
                     .weight(1f)

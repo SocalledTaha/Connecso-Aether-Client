@@ -72,7 +72,6 @@ object AetherNotification {
         // wrong edge by RemoteViews' bidi handling.
         val routeLabel = directional(context, countryLabel(context, state.country.ifBlank { state.title }))
         val compact = RemoteViews(context.packageName, R.layout.notification_compact).apply {
-            setImageViewResource(R.id.notification_compact_logo, R.mipmap.ic_launcher)
             setTextViewText(R.id.notification_compact_country, routeLabel)
             setTextViewText(R.id.notification_compact_upload, directional(context, "↑${compactRate(state.upload)}"))
             setTextViewText(R.id.notification_compact_download, directional(context, "↓${compactRate(state.download)}"))
@@ -89,7 +88,6 @@ object AetherNotification {
             setTextColor(R.id.notification_compact_ping, textColor)
         }
         val expanded = RemoteViews(context.packageName, R.layout.notification_expanded).apply {
-            setImageViewResource(R.id.notification_expanded_logo, R.mipmap.ic_launcher)
             setTextViewText(R.id.notification_expanded_title, routeLabel)
             setTextViewText(
                 R.id.notification_expanded_details,

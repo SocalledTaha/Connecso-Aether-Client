@@ -476,7 +476,7 @@ private fun FamilyHeader(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Image(
-                painterResource(R.drawable.ic_connecso_launcher_foreground), null,
+                painterResource(R.drawable.connecso_windows_icon), null,
                 Modifier.size(42.dp),
             )
             Text(

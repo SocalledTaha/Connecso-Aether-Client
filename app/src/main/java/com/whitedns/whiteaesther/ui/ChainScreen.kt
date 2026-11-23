@@ -1,8 +1,5 @@
 package com.whitedns.whiteaesther.ui
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.widget.Toast
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -25,11 +22,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -42,7 +37,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
@@ -52,7 +46,6 @@ import com.whitedns.whiteaesther.ChainState
 import com.whitedns.whiteaesther.R
 import com.whitedns.whiteaesther.data.AppSettings
 import com.whitedns.whiteaesther.data.Carrier
-import com.whitedns.whiteaesther.data.ChainSource
 import com.whitedns.whiteaesther.data.EngineMode
 import com.whitedns.whiteaesther.service.EngineStage
 import com.whitedns.whiteaesther.service.EngineStatus
@@ -119,10 +112,7 @@ fun ChainScreen(
             stringResource(R.string.adds_a_second_hop_after_the_tunnel),
         )
 
-        // Subscription links are also the place where users add, pin, refresh,
-        // and edit their destination nodes. Keep that management UI available
-        // even when the native chain engine is unavailable in this build.
-        SourcesCard(settings, onSettingsChange, onRefreshNodes, onRefreshSource)
+        ActivationCodeCard(settings, onSettingsChange, onRefreshNodes)
         Spacer(Modifier.height(12.dp))
 
         if (!chainState.available) {
@@ -209,217 +199,81 @@ fun ChainScreen(
 }
 
 @Composable
-private fun SourcesCard(settings: AppSettings, onSettingsChange: (AppSettings) -> Unit, onRefreshAll: () -> Unit, onRefreshSource: (String) -> Unit) {
+private fun ActivationCodeCard(
+    settings: AppSettings,
+    onSettingsChange: (AppSettings) -> Unit,
+    onRefresh: () -> Unit,
+) {
     val colors = AetherTheme.colors
-    val context = LocalContext.current
     val chain = settings.chain
-    var draft by rememberSaveable { mutableStateOf("") }
-    var pasting by rememberSaveable { mutableStateOf(false) }
-    var manual by rememberSaveable(chain.manual) { mutableStateOf(chain.manual) }
-    val sourceInteraction = remember { MutableInteractionSource() }
-    val manualInteraction = remember { MutableInteractionSource() }
+    var draft by rememberSaveable(chain.activationCode) {
+        mutableStateOf(chain.activationCode)
+    }
+    val valid = draft.trim().matches(Regex("[A-Za-z0-9_-]{4,128}"))
+    val changed = draft.trim() != chain.activationCode
 
     AetherCard {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Column(Modifier.weight(1f)) {
-                Text(stringResource(R.string.where_your_nodes_come_from), style = AetherTheme.type.RowTitle, color = colors.text)
-                Text(stringResource(R.string.a_subscription_link_or_nodes_pasted_by), style = AetherTheme.type.Small, color = colors.text2)
+                Text(stringResource(R.string.activation_code), style = AetherTheme.type.RowTitle, color = colors.text)
+                Text(stringResource(R.string.activation_code_description), style = AetherTheme.type.Small, color = colors.text2)
             }
-            OutlineButton(text = stringResource(R.string.refresh_all), onClick = onRefreshAll)
+            OutlineButton(
+                text = stringResource(R.string.refresh_destinations),
+                onClick = onRefresh,
+                enabled = chain.activationCode.isNotBlank(),
+            )
         }
-
-        chain.sources.forEachIndexed { index, source ->
-            Divider()
-            var editing by rememberSaveable(source.url) { mutableStateOf(false) }
-            var editedUrl by rememberSaveable(source.url) { mutableStateOf(source.url) }
-            var confirmDelete by rememberSaveable(source.url) { mutableStateOf(false) }
-            val updatedSources: (ChainSource) -> Unit = { replacement ->
-                val nextSources = chain.sources.toMutableList().also { it[index] = replacement }
-                val fallback = nextSources.firstOrNull { it.enabled && it.url != source.url }?.url
-                onSettingsChange(settings.copy(chain = chain.copy(
-                    sources = nextSources,
-                    activeSubscriptionUrl = if (!replacement.enabled && chain.activeSubscriptionUrl == source.url) fallback else chain.activeSubscriptionUrl,
-                    defaultSubscriptionUrl = if (!replacement.enabled && chain.defaultSubscriptionUrl == source.url) fallback else chain.defaultSubscriptionUrl,
-                )))
-            }
-            Column(Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 9.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(checked = source.enabled, onCheckedChange = { updatedSources(source.copy(enabled = it)) }, colors = CheckboxDefaults.colors(checkedColor = colors.brand))
-                    Column(Modifier.weight(1f)) {
-                        Text(source.name, style = AetherTheme.type.RowTitle, color = colors.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(source.url, style = AetherTheme.type.Small, color = colors.text3, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                    Box(Modifier.size(34.dp).clip(CircleShape).clickable(role = Role.Button, onClick = { onRefreshSource(source.url) }), contentAlignment = Alignment.Center) {
-                        Icon(AetherIcons.Refresh, stringResource(R.string.refresh_subscription), Modifier.size(18.dp), colors.brand)
-                    }
-                    Box(Modifier.size(34.dp).clip(CircleShape).clickable(role = Role.Button, onClick = {
-                        val selected = chain.defaultSubscriptionUrl != source.url
-                        val enabled = if (selected && !source.enabled) chain.sources.toMutableList().also { it[index] = source.copy(enabled = true) } else chain.sources
-                        onSettingsChange(settings.copy(chain = chain.copy(
-                            sources = enabled,
-                            defaultSubscriptionUrl = if (selected) source.url else null,
-                        )))
-                    }), contentAlignment = Alignment.Center) {
-                        Icon(AetherIcons.Pin, stringResource(if (chain.defaultSubscriptionUrl == source.url) R.string.unpin_default_subscription else R.string.pin_as_default), Modifier.size(18.dp), if (chain.defaultSubscriptionUrl == source.url) colors.brand else colors.text3)
-                    }
-                    Box(Modifier.size(34.dp).clip(CircleShape).clickable(role = Role.Button, onClick = {
-                        (context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as? ClipboardManager)
-                            ?.setPrimaryClip(ClipData.newPlainText(source.name, source.url))
-                        Toast.makeText(context, context.getString(R.string.subscription_link_copied), Toast.LENGTH_SHORT).show()
-                    }), contentAlignment = Alignment.Center) {
-                        Icon(AetherIcons.Copy, stringResource(R.string.copy_subscription_link), Modifier.size(18.dp), colors.text3)
-                    }
-                    Box(Modifier.size(34.dp).clip(CircleShape).clickable(role = Role.Button, onClick = { editing = true }), contentAlignment = Alignment.Center) {
-                        Icon(AetherIcons.Edit, stringResource(R.string.edit_subscription), Modifier.size(17.dp), colors.text3)
-                    }
-                    Box(Modifier.size(34.dp).clip(CircleShape).clickable(role = Role.Button, onClick = { confirmDelete = true }), contentAlignment = Alignment.Center) {
-                        Icon(AetherIcons.Trash, stringResource(R.string.delete_subscription), Modifier.size(17.dp), colors.text3)
-                    }
-                }
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                    Checkbox(checked = source.autoRefresh, onCheckedChange = { updatedSources(source.copy(autoRefresh = it)) }, colors = CheckboxDefaults.colors(checkedColor = colors.brand))
-                    Text(stringResource(R.string.auto_refresh), style = AetherTheme.type.Small, color = colors.text2)
-                    TextButton(onClick = {
-                        val options = listOf(1, 3, 6, 12, 24)
-                        val next = options[(options.indexOf(source.refreshIntervalHours).coerceAtLeast(0) + 1) % options.size]
-                        updatedSources(source.copy(refreshIntervalHours = next))
-                    }) { Text(stringResource(R.string.every_hours, source.refreshIntervalHours), color = colors.brand) }
-                    Spacer(Modifier.weight(1f))
-                    if (chain.activeSubscriptionUrl == source.url) Text(stringResource(R.string.active_subscription), style = AetherTheme.type.Small, color = colors.brand)
-                    else TextButton(onClick = {
-                        val enabled = if (source.enabled) chain.sources else chain.sources.toMutableList().also { it[index] = source.copy(enabled = true) }
-                        onSettingsChange(settings.copy(chain = chain.copy(sources = enabled, activeSubscriptionUrl = source.url)))
-                    }) { Text(stringResource(R.string.set_active), color = colors.text3) }
-                }
-            }
-            if (confirmDelete) {
-                AlertDialog(
-                    onDismissRequest = { confirmDelete = false },
-                    title = { Text(stringResource(R.string.delete_subscription)) },
-                    text = { Text(stringResource(R.string.confirm_delete_subscription, source.name)) },
-                    confirmButton = { TextButton(onClick = {
-                        val next = chain.sources.filterIndexed { at, _ -> at != index }
-                        val fallback = next.firstOrNull { it.enabled }?.url
-                        onSettingsChange(settings.copy(chain = chain.copy(
-                            sources = next,
-                            activeSubscriptionUrl = if (chain.activeSubscriptionUrl == source.url) fallback else chain.activeSubscriptionUrl,
-                            defaultSubscriptionUrl = if (chain.defaultSubscriptionUrl == source.url) fallback else chain.defaultSubscriptionUrl,
-                        )))
-                        confirmDelete = false
-                    }) { Text(stringResource(R.string.delete)) } },
-                    dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text(stringResource(R.string.cancel)) } },
-                )
-            }
-            if (editing) {
-                AlertDialog(
-                    onDismissRequest = { editing = false },
-                    title = { Text(stringResource(R.string.edit_subscription)) },
-                    text = { OutlinedTextField(value = editedUrl, onValueChange = { editedUrl = it.take(512) }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)) },
-                    confirmButton = { TextButton(onClick = {
-                        if (editedUrl.isValidSubscription()) {
-                            val replacement = source.copy(name = editedUrl.subscriptionName(), url = editedUrl.trim())
-                            onSettingsChange(settings.copy(chain = chain.copy(
-                                sources = chain.sources.toMutableList().also { it[index] = replacement },
-                                activeSubscriptionUrl = replacement.url.takeIf { chain.activeSubscriptionUrl == source.url } ?: chain.activeSubscriptionUrl,
-                                defaultSubscriptionUrl = replacement.url.takeIf { chain.defaultSubscriptionUrl == source.url } ?: chain.defaultSubscriptionUrl,
-                            )))
-                            editing = false
-                        }
-                    }) { Text(stringResource(R.string.save)) } },
-                    dismissButton = { TextButton(onClick = { editing = false }) { Text(stringResource(R.string.cancel)) } },
-                )
-            }
-        }
-
         Divider()
-        Column(Modifier.padding(horizontal = 15.dp, vertical = 12.dp)) {
-            SectionLabel(stringResource(R.string.add_a_subscription))
-            Spacer(Modifier.height(7.dp))
+        Column(Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 12.dp)) {
             OutlinedTextField(
                 value = draft,
-                onValueChange = { draft = it.take(512) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .tvTextFieldSupport(sourceInteraction)
-                    .testTag("chain-source-field"),
-                interactionSource = sourceInteraction,
-                placeholder = {
-                    Text(stringResource(R.string.https), style = AetherTheme.type.Data, color = colors.text3)
-                },
+                onValueChange = { draft = it.filterNot(Char::isWhitespace).take(128) },
+                modifier = Modifier.fillMaxWidth().testTag("activation-code-field"),
+                placeholder = { Text(stringResource(R.string.enter_activation_code)) },
                 textStyle = AetherTheme.type.Data.copy(color = colors.text),
                 singleLine = true,
                 shape = RoundedCornerShape(14.dp),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
                 colors = TextFieldDefaults.colors(
                     focusedContainerColor = colors.ink1,
                     unfocusedContainerColor = colors.ink1,
                 ),
             )
+            if (draft.isNotBlank() && !valid) {
+                Note(stringResource(R.string.activation_code_invalid))
+            }
             Spacer(Modifier.height(9.dp))
-            PrimaryButton(
-                text = stringResource(R.string.add),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("chain-add-source"),
-                enabled = draft.isValidSubscription(),
-            ) {
-                onSettingsChange(
-                    settings.copy(
-                        chain = chain.copy(
-                            sources = chain.sources + ChainSource(draft.subscriptionName(), draft.trim()),
-                            activeSubscriptionUrl = chain.activeSubscriptionUrl ?: draft.trim(),
-                            defaultSubscriptionUrl = chain.defaultSubscriptionUrl ?: draft.trim(),
-                        ),
-                    ),
-                )
-                draft = ""
-            }
-            if (draft.isNotBlank() && !draft.isValidSubscription()) {
-                Note(stringResource(R.string.a_subscription_is_an_https_link_your))
-            }
-        }
-
-        Divider()
-        RowCard(
-            icon = AetherIcons.Copy,
-            title = stringResource(R.string.paste_nodes_by_hand),
-            subtitle = when (val count = chain.manual.lines().count { it.isNotBlank() }) {
-                0 -> stringResource(R.string.none_one_link_per_line_vless_vmess)
-                1 -> stringResource(R.string.t_1_node)
-                else -> stringResource(R.string.count_nodes, count)
-            },
-            onClick = { pasting = !pasting },
-        )
-        if (pasting) {
-            Column(Modifier.padding(horizontal = 15.dp).padding(bottom = 12.dp)) {
-                OutlinedTextField(
-                    value = manual,
-                    onValueChange = { manual = it.take(20_000) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 120.dp)
-                        .tvTextFieldSupport(manualInteraction)
-                        .testTag("chain-manual-field"),
-                    interactionSource = manualInteraction,
-                    placeholder = {
-                        Text(stringResource(R.string.vless), style = AetherTheme.type.Data, color = colors.text3)
-                    },
-                    textStyle = AetherTheme.type.Data.copy(color = colors.text),
-                    shape = RoundedCornerShape(14.dp),
-                    colors = TextFieldDefaults.colors(
-                        focusedContainerColor = colors.ink1,
-                        unfocusedContainerColor = colors.ink1,
-                    ),
-                )
-                Spacer(Modifier.height(9.dp))
-                OutlineButton(
-                    text = stringResource(R.string.save_nodes),
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = manual != chain.manual,
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                PrimaryButton(
+                    text = stringResource(if (chain.activationCode.isBlank()) R.string.activate_code else R.string.update_activation_code),
+                    modifier = Modifier.weight(1f).testTag("activation-code-apply"),
+                    enabled = valid && changed,
                 ) {
-                    onSettingsChange(settings.copy(chain = chain.copy(manual = manual)))
-                    pasting = false
+                    val updated = chain.withActivationCode(draft)
+                    onSettingsChange(settings.copy(chain = updated))
                 }
+                if (chain.activationCode.isNotBlank()) {
+                    OutlineButton(
+                        text = stringResource(R.string.remove_activation_code),
+                        modifier = Modifier.weight(1f),
+                        onClick = {
+                            draft = ""
+                            onSettingsChange(settings.copy(chain = chain.withActivationCode("")))
+                        },
+                    )
+                }
+            }
+            if (chain.activationCode.isNotBlank()) {
+                Text(
+                    stringResource(R.string.activation_code_active, chain.activationCode.takeLast(4)),
+                    style = AetherTheme.type.Small,
+                    color = colors.text2,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
             }
         }
     }
@@ -597,7 +451,6 @@ private fun NodesCard(
                 )
             }
         }
-        Unit
     }
 }
 
@@ -848,19 +701,3 @@ private fun NodeRow(
         )
     }
 }
-
-/**
- * Only http(s). mihomo will also take a file path, which on a phone would be a
- * path the app cannot read -- accepting it produces a config that loads and a
- * provider that never has any nodes.
- */
-private fun String.isValidSubscription(): Boolean {
-    val value = trim()
-    return (value.startsWith("https://") || value.startsWith("http://")) && value.length > 10
-}
-
-/** The host, so a list of subscriptions is tellable apart at a glance. */
-private fun String.subscriptionName(): String = trim()
-    .substringAfter("://")
-    .substringBefore('/')
-    .substringBefore(':')
