@@ -43,6 +43,8 @@ import com.whitedns.whiteaesther.service.EngineStatusStore
 import com.whitedns.whiteaesther.service.TrafficMeter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -55,6 +57,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
 import java.net.InetSocketAddress
@@ -115,6 +118,8 @@ data class ChainState(
      * with no number is indistinguishable from a run that has died.
      */
     val testProgress: Pair<Int, Int>? = null,
+    /** Node names whose current RTT probe is in flight. */
+    val testingNodes: Set<String> = emptySet(),
     val error: String? = null,
     /** The engine is running a configuration the settings no longer describe. */
     val stale: Boolean = false,
@@ -833,11 +838,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
             val reported = withContext(Dispatchers.IO) { chain.nodes() }
+            // Mihomo's stored history uses its own URL-test metric. Do not show
+            // that cached value as if it were the live RTT used by manual ping.
+            // The destination screen's automatic check must use the exact same
+            // probe path as its per-node and Ping all actions.
+            val freshNodes = reported.nodes.map { it.copy(delay = null, delayUpdatedAt = null) }
             mutableChainState.value = ChainState(
                 available = chain.isAvailable,
-                nodes = reported.nodes,
+                nodes = freshNodes,
                 selected = reported.selected,
             )
+            runDelayTests(freshNodes.filter { it.supported }.map { it.name })
         }
     }
 
@@ -859,12 +870,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 else chain.refreshProvider(sourceUrl)
             }
             val reported = withContext(Dispatchers.IO) { chain.nodes() }
+            val freshNodes = reported.nodes.map { it.copy(delay = null, delayUpdatedAt = null) }
             mutableChainState.value = ChainState(
                 available = chain.isAvailable,
-                nodes = reported.nodes,
+                nodes = freshNodes,
                 selected = reported.selected,
                 error = failure,
             )
+            runDelayTests(freshNodes.filter { it.supported }.map { it.name })
         }
     }
 
@@ -898,7 +911,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun cancelChainTests() {
         chainJob?.cancel()
         chainJob = null
-        mutableChainState.value = mutableChainState.value.copy(busy = false, testProgress = null)
+        mutableChainState.value = mutableChainState.value.copy(busy = false, testProgress = null, testingNodes = emptySet())
         viewModelScope.launch {
             val reported = withContext(Dispatchers.IO) { chain.nodes() }
             mutableChainState.value = mutableChainState.value.copy(
@@ -975,49 +988,53 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Measures the nodes a handful at a time, showing results as they arrive.
-     *
-     * All at once was the bug: fifty delay tests fired together are fifty
-     * concurrent requests through one tunnel, and the tunnel saturates. The
-     * first few answered and the rest timed out, so most of the list came back
-     * blank however long the wait was afterwards.
-     *
-     * Reading the list between batches also means the pings appear as they are
-     * measured rather than all at the end, which on a long list is the
-     * difference between progress and a frozen screen.
+     * Measures fresh destination TCP RTTs over Aether and renders each result
+     * immediately. Small batches keep probes from contending with user traffic.
      */
     private fun runDelayTests(names: List<String>) {
         chainJob = viewModelScope.launch {
             var done = 0
+            val total = names.size
+            val pendingUi = mutableChainState.value.nodes.map { node ->
+                if (node.name in names) node.copy(delay = null, delayUpdatedAt = null) else node
+            }
             mutableChainState.value = mutableChainState.value.copy(
                 busy = true,
                 error = null,
-                testProgress = 0 to names.size,
+                nodes = pendingUi,
+                testProgress = 0 to total,
+                testingNodes = emptySet(),
             )
             for (batch in names.chunked(DELAY_TEST_BATCH)) {
-                withContext(Dispatchers.IO) { chain.testNodes(batch) }
-                delay(DELAY_TEST_BATCH_MS)
-                done += batch.size
-                // Reading the list back is a JNI call returning every proxy as
-                // JSON, so on a thousand nodes it is the expensive half of the
-                // loop. Done every few batches rather than every one: often
-                // enough to watch pings arrive, rarely enough not to dominate.
-                val partial = if (done % (DELAY_TEST_BATCH * REFRESH_EVERY) == 0) {
-                    withContext(Dispatchers.IO) { chain.nodes() }
-                } else {
-                    null
+                mutableChainState.value = mutableChainState.value.copy(testingNodes = batch.toSet())
+                coroutineScope {
+                    val results = Channel<Pair<String, Int?>>(batch.size)
+                    val jobs = batch.map { name ->
+                        launch(Dispatchers.IO) {
+                            val rtt = runCatching { chain.probeNodeEndpoint(name) }.getOrNull()
+                            results.send(name to rtt)
+                        }
+                    }
+                    repeat(batch.size) {
+                        val (name, rtt) = results.receive()
+                        done++
+                        val now = System.currentTimeMillis().toString()
+                        mutableChainState.value = mutableChainState.value.copy(
+                            nodes = mutableChainState.value.nodes.map { node ->
+                                if (node.name == name) node.copy(delay = rtt, delayUpdatedAt = rtt?.let { now }) else node
+                            },
+                            testProgress = done to total,
+                            testingNodes = mutableChainState.value.testingNodes - name,
+                        )
+                    }
+                    jobs.joinAll()
+                    results.close()
                 }
-                mutableChainState.value = mutableChainState.value.copy(
-                    nodes = partial?.nodes ?: mutableChainState.value.nodes,
-                    selected = partial?.selected ?: mutableChainState.value.selected,
-                    testProgress = done to names.size,
-                )
             }
-            val reported = withContext(Dispatchers.IO) { chain.nodes() }
-            mutableChainState.value = ChainState(
-                available = chain.isAvailable,
-                nodes = reported.nodes,
-                selected = reported.selected,
+            mutableChainState.value = mutableChainState.value.copy(
+                busy = false,
+                testProgress = null,
+                testingNodes = emptySet(),
             )
         }
     }
@@ -1260,13 +1277,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
          * Small enough that one tunnel carries them without the tests starving
          * each other, large enough that a long list does not take all evening.
          */
-        const val DELAY_TEST_BATCH = 16
-
-        /** One batch's wait, now that it is not counted per node. */
-        const val DELAY_TEST_BATCH_MS = 6_000L
-
-        /** Batches between full re-reads of the list. */
-        const val REFRESH_EVERY = 4
+        /** Small concurrent groups limit tunnel contention while keeping each result live. */
+        const val DELAY_TEST_BATCH = 3
 
         /** One second: fast enough to read as live, slow enough to be free. */
         const val TRAFFIC_SAMPLE_MS = 1_000L

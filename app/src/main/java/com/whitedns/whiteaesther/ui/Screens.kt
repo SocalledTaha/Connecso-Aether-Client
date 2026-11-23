@@ -148,8 +148,8 @@ enum class ConnectionProfile(
         R.string.profile_adaptive,
         R.string.works_on_most_networks_start_here,
         R.string.profile_recommended,
-        ScanStrategy.BALANCED,
-        TunnelProtocol.AUTO,
+        ScanStrategy.TURBO,
+        TunnelProtocol.H2,
     ),
     PATCHY(
         R.string.patchy_signal,
@@ -496,7 +496,7 @@ fun HomeScreen(
             else -> stringResource(R.string.warp_direct_destination)
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            AetherCard(modifier = Modifier.weight(1f)) {
+            AetherCard(modifier = if (status.stage == EngineStage.CONNECTED) Modifier.fillMaxWidth() else Modifier.weight(1f)) {
                 HomeSelectionRow(
                     title = stringResource(R.string.destination),
                     value = destinationValue,
@@ -506,13 +506,15 @@ fun HomeScreen(
                     onClick = { destinationDialog = true },
                 )
             }
-            AetherCard(modifier = Modifier.weight(1f)) {
-                HomeMethodMenu(
-                    settings = settings,
-                    status = status,
-                    onSettingsChange = onSettingsChange,
-                    onGoToRoutes = onGoToRoutes,
-                )
+            if (status.stage != EngineStage.CONNECTED) {
+                AetherCard(modifier = Modifier.weight(1f)) {
+                    HomeMethodMenu(
+                        settings = settings,
+                        status = status,
+                        onSettingsChange = onSettingsChange,
+                        onGoToRoutes = onGoToRoutes,
+                    )
+                }
             }
         }
         Spacer(Modifier.height(10.dp))
@@ -1103,7 +1105,7 @@ private fun DestinationDialog(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                Icon(AetherIcons.Globe, null, Modifier.size(20.dp), colors.brand)
+                Icon(AetherIcons.Globe, null, Modifier.size(24.dp), colors.brand)
                 Text(
                     stringResource(R.string.destination),
                     style = AetherTheme.type.CardTitle,
@@ -1129,7 +1131,7 @@ private fun DestinationDialog(
                         enabled = !chainState.busy,
                         modifier = Modifier.size(34.dp),
                     ) {
-                        Icon(AetherIcons.Refresh, stringResource(R.string.refresh_destinations), Modifier.size(17.dp), colors.brand)
+                        Icon(AetherIcons.Refresh, stringResource(R.string.refresh_destinations), Modifier.size(20.dp), colors.brand)
                     }
                 }
                 Text(
@@ -1186,7 +1188,7 @@ private fun DestinationDialog(
                             node = node,
                             selected = selected == node.name,
                             enabled = !chainState.busy && node.supported,
-                            pinging = chainState.testProgress != null,
+                            pinging = node.name in chainState.testingNodes,
                             onChoose = { onSelect(node.name) },
                             onPing = { onPing(listOf(node.name)) },
                         )
@@ -1238,7 +1240,7 @@ private fun DestinationOption(
         Icon(
             if (selected) AetherIcons.Check else AetherIcons.Globe,
             null,
-            Modifier.size(20.dp),
+            Modifier.size(24.dp),
             if (selected) colors.brand else colors.text3,
         )
         Column(Modifier.weight(1f)) {
@@ -1271,7 +1273,7 @@ private fun DestinationNodeOption(
             Icon(
                 if (selected) AetherIcons.Check else AetherIcons.Globe,
                 null,
-                Modifier.size(20.dp),
+                Modifier.size(24.dp),
                 if (selected) colors.brand else colors.text3,
             )
             Column(Modifier.weight(1f)) {

@@ -230,6 +230,7 @@ class ChainController(private val context: Context) {
         // reports a node's protocol but not its security layer -- and a
         // REALITY node arrives looking like any other VLESS one.
         val reality = RealityNodes.detect(home)
+        val endpoints = NodeEndpointCatalog.read(home)
 
         val nodes = buildList {
             for (index in 0 until members.length()) {
@@ -240,10 +241,12 @@ class ChainController(private val context: Context) {
                         name = name,
                         kind = entry?.optString("type").orEmpty().ifBlank { "Unknown" },
                         delay = entry?.optJSONArray("history")
-                            ?.let { history ->
-                                history.optJSONObject(history.length() - 1)?.optInt("delay", 0)
-                            }
+                            ?.let { history -> history.optJSONObject(history.length() - 1)?.optInt("delay", 0) }
                             ?.takeIf { it > 0 },
+                        delayUpdatedAt = entry?.optJSONArray("history")
+                            ?.let { history -> history.optJSONObject(history.length() - 1)?.optString("time") }
+                            ?.takeIf { !it.isNullOrBlank() && it != "null" },
+                        endpoint = endpoints[name],
                         supported = name !in reality,
                     ),
                 )
@@ -336,28 +339,82 @@ class ChainController(private val context: Context) {
         return failure
     }
 
-    /**
-     * Measures each node, through whatever the chain is dialling through.
-     *
-     * The engine answers each test on its own goroutine and reports the result
-     * as a delay event, so the numbers arrive through the log stream rather than
-     * from here -- this only asks.
-     */
+    /** Measures a fresh TCP connection to a node endpoint through Aether's SOCKS listener. */
+    fun probeNodeEndpoint(node: String): Int? {
+        val endpoint = NodeEndpointCatalog.read(home)[node] ?: return null
+        if (endpoint.datagram) return probeDatagramNode(node)
+        val carrierPort = activeSocksPort?.takeIf { it in 1..65535 } ?: return null
+        return runCatching {
+            // Resolve before starting the clock and send the address to SOCKS.
+            // Sending ATYP=DOMAIN makes the carrier resolve it as part of the
+            // CONNECT request; that resolution can add hundreds of ms and is
+            // not included by the Windows RTT probe, which resolves locally.
+            val target = java.net.InetAddress.getAllByName(endpoint.host)
+                .firstOrNull() ?: return null
+            java.net.Socket().use { socket ->
+                socket.soTimeout = DELAY_TEST_TIMEOUT_MS.toInt()
+                socket.connect(java.net.InetSocketAddress("127.0.0.1", carrierPort), DELAY_TEST_TIMEOUT_MS.toInt())
+                val input = java.io.DataInputStream(socket.getInputStream())
+                val output = java.io.DataOutputStream(socket.getOutputStream())
+                // Establish the local SOCKS session outside the RTT window.
+                output.write(byteArrayOf(5, 1, 0)); output.flush()
+                if (input.readUnsignedByte() != 5 || input.readUnsignedByte() != 0) return null
+                val started = android.os.SystemClock.elapsedRealtime()
+                val address = target.address
+                when (address.size) {
+                    4 -> output.write(byteArrayOf(5, 1, 0, 1) + address)
+                    16 -> output.write(byteArrayOf(5, 1, 0, 4) + address)
+                    else -> return null
+                }
+                output.write((endpoint.port ushr 8) and 0xff)
+                output.write(endpoint.port and 0xff)
+                output.flush()
+                if (input.readUnsignedByte() != 5) return null
+                val reply = input.readUnsignedByte()
+                input.readUnsignedByte()
+                when (input.readUnsignedByte()) {
+                    1 -> input.readFully(ByteArray(4))
+                    3 -> input.readFully(ByteArray(input.readUnsignedByte()))
+                    4 -> input.readFully(ByteArray(16))
+                    else -> return null
+                }
+                input.readFully(ByteArray(2))
+                if (reply != 0) return null
+                (android.os.SystemClock.elapsedRealtime() - started).toInt().coerceAtLeast(1)
+            }
+        }.getOrNull()
+    }
+
+    /** Queue Mihomo's exit-route health check for the connected-state ping card. */
     fun testNodes(nodes: List<String>) {
         if (!isAvailable) return
         nodes.forEach { node ->
             NativeChainBridge.invoke(
                 "asyncTestDelay",
-                JSONObject()
-                    .put("proxy-name", node)
-                    // Measure a real TLS HTTP round trip, matching the RTT probe
-                    // used by the Windows client. The old cleartext endpoint
-                    // only measured an HTTP health check and understated or
-                    // misrepresented latency on some routes.
+                JSONObject().put("proxy-name", node)
                     .put("test-url", "https://www.google.com/generate_204")
                     .put("timeout", DELAY_TEST_TIMEOUT_MS),
             )
         }
+    }
+
+    /** QUIC-only nodes have no TCP listener; use Mihomo's route health probe for those. */
+    private fun probeDatagramNode(node: String): Int? {
+        if (!isAvailable) return null
+        val before = nodes().nodes.firstOrNull { it.name == node }?.delayUpdatedAt
+        NativeChainBridge.invoke(
+            "asyncTestDelay",
+            JSONObject().put("proxy-name", node)
+                .put("test-url", "https://www.google.com/generate_204")
+                .put("timeout", DELAY_TEST_TIMEOUT_MS),
+        )
+        val deadline = android.os.SystemClock.elapsedRealtime() + DELAY_TEST_TIMEOUT_MS + 300L
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            Thread.sleep(100)
+            val current = nodes().nodes.firstOrNull { it.name == node } ?: continue
+            if (current.delayUpdatedAt != null && current.delayUpdatedAt != before) return current.delay
+        }
+        return null
     }
 
     /**
@@ -448,7 +505,7 @@ class ChainController(private val context: Context) {
             "setupConfig",
             JSONObject()
                 .put("selected-map", JSONObject())
-                .put("test-url", "https://www.google.com/generate_204"),
+                .put("test-url", "http://www.gstatic.com/generate_204"),
         )
         return reply.failureText()?.let { "The chain rejected its configuration: $it" }
     }
@@ -467,7 +524,7 @@ class ChainController(private val context: Context) {
         }
     }
 
-    private companion object {
+    internal companion object {
         const val DELAY_TEST_TIMEOUT_MS = 5_000L
 
         /**
@@ -501,6 +558,10 @@ data class ChainNode(
     val kind: String,
     /** Milliseconds through the tunnel, or null when the last test failed. */
     val delay: Int?,
+    /** Timestamp of the current mihomo RTT sample; used to distinguish new pings from cached history. */
+    val delayUpdatedAt: String? = null,
+    /** Provider endpoint used for a fresh TCP RTT through Aether. */
+    val endpoint: NodeEndpoint? = null,
     /**
      * False when this build's engine cannot authenticate with the node.
      *

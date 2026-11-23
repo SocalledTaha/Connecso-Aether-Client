@@ -121,9 +121,10 @@ pub fn masque_pins() -> Vec<&'static [u8]> {
 /// How long before a pin expires the build should start failing.
 ///
 /// Long enough to notice, decide, build, release, and have people install it —
-/// on connections that are slow and intermittent, which is most of them. A
-/// warning that arrives a fortnight ahead is not a warning.
-pub const PIN_RENEWAL_NOTICE_DAYS: u64 = 100;
+/// on connections that are slow and intermittent, which is most of them. Keep
+/// this at 90 days to give a full quarter to ship a replacement while allowing
+/// releases during that renewal window.
+pub const PIN_RENEWAL_NOTICE_DAYS: u64 = 90;
 
 #[cfg(test)]
 mod tests {

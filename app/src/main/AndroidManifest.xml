@@ -136,7 +136,7 @@
         <service
             android:name=".service.AetherTileService"
             android:exported="true"
-            android:icon="@drawable/ic_notification"
+            android:icon="@drawable/connecso_notification_mark_large"
             android:label="@string/app_name"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
             <intent-filter>

@@ -96,7 +96,8 @@ object InstalledApps {
                         packageName = info.packageName,
                         label = runCatching { manager.getApplicationLabel(info).toString() }
                             .getOrDefault(info.packageName),
-                        system = (info.flags and ApplicationInfo.FLAG_SYSTEM) != 0,
+                        system = (info.flags and ApplicationInfo.FLAG_SYSTEM) != 0 &&
+                            info.packageName !in USER_FACING_PREINSTALLED_APPS,
                     )
                 }
                 .sortedWith(compareBy({ it.system }, { it.label.lowercase() }))
@@ -128,4 +129,26 @@ object InstalledApps {
     fun preloadIcons(context: Context, apps: List<InstalledApp>, sizePx: Int) {
         apps.forEach { iconBitmap(context, it.packageName, sizePx) }
     }
+
+    /** Google apps people choose by name should stay in the ordinary app list even on OEM builds that mark them as system packages. */
+    private val USER_FACING_PREINSTALLED_APPS = setOf(
+        "com.android.chrome",
+        "com.google.android.youtube",
+        "com.google.android.gm",
+        "com.google.android.apps.maps",
+        "com.google.android.apps.photos",
+        "com.google.android.apps.docs",
+        "com.google.android.calendar",
+        "com.google.android.apps.tachyon",
+        "com.google.android.apps.messaging",
+        "com.google.android.googlequicksearchbox",
+        "com.google.android.play.games",
+        "com.google.android.videos",
+        "com.google.android.apps.nbu.files",
+        "com.google.android.keep",
+        "com.google.android.apps.translate",
+        "com.google.android.apps.walletnfcrel",
+        "com.google.android.apps.chromecast.app",
+        "com.google.android.apps.youtube.music",
+    )
 }

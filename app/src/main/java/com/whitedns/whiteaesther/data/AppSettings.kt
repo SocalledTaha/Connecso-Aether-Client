@@ -352,11 +352,8 @@ data class AppSettings(
      * structure asks [com.whitedns.whiteaesther.core.TorBridges] for it.
      */
     val torBridges: String = "",
-    // Automatic, because the answer depends on the network and the user has no
-    // way to know it. A fixed default of H3 meant every install on a network
-    // that blocks UDP spent minutes failing before anything else was tried.
-    val transport: TunnelProtocol = TunnelProtocol.AUTO,
-    val scanStrategy: ScanStrategy = ScanStrategy.BALANCED,
+    val transport: TunnelProtocol = TunnelProtocol.H2,
+    val scanStrategy: ScanStrategy = ScanStrategy.TURBO,
     val dualStack: Boolean = true,
     val validationEnabled: Boolean = true,
     val noizeProfile: String = "firewall",

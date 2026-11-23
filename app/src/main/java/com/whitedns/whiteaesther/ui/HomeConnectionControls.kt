@@ -116,7 +116,7 @@ internal fun MethodChoices(settings: AppSettings, onSelect: (AppSettings) -> Uni
                 automaticCarrier = false,
                 carrier = Carrier.AETHER,
                 secondCarrier = null,
-                transport = com.whitedns.whiteaesther.data.TunnelProtocol.AUTO,
+                transport = com.whitedns.whiteaesther.data.TunnelProtocol.H2,
             ))
         },
     )
@@ -194,7 +194,7 @@ internal fun HomeSelectionRow(
                 modifier = Modifier.weight(1.1f), maxLines = 2, overflow = TextOverflow.Ellipsis,
             )
         }
-        Icon(AetherIcons.Chevron, null, Modifier.size(16.dp), colors.text2)
+        Icon(AetherIcons.Chevron, null, Modifier.size(19.dp), colors.text2)
     }
 }
 

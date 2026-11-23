@@ -64,6 +64,19 @@ class EndpointDiscoveryMemory(context: Context) {
         editor.apply()
     }
 
+    /** Save the endpoint that actually completed native preparation as the first hint. */
+    fun rememberConnected(network: String?, settings: AppSettings, peer: String) {
+        if (network == null) return
+        val normalized = EndpointAddress.normalize(peer) ?: return
+        val profile = EndpointProbeProfile.from(settings)
+        val cached = read(network, settings).filterNot {
+            it.peer == normalized && it.profile == profile
+        }
+        write(network, settings, listOf(
+            EndpointScanResult(normalized, 0, profile, successfulChecks = 1, attemptedChecks = 1),
+        ) + cached)
+    }
+
     fun forget(network: String?, settings: AppSettings) {
         if (network != null) preferences.edit().remove(key(network, settings)).apply()
     }

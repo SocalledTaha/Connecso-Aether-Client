@@ -34,8 +34,26 @@ class AutomaticEndpointPreparation(
         val settings = settings(base)
         val remaining = budgetMillis - (nowMillis() - started) - CONNECT_RESERVE_MS
         if (remaining <= 0) return Result.failure(IllegalStateException("identity preparation used the connection budget"))
+        // A previously verified endpoint is the normal fast path. Re-test it
+        // once on this network and connect immediately; run the wider profile
+        // search only when that endpoint is no longer usable.
+        val preferred = hints.firstOrNull { it.profile != null && it.peer.isNotBlank() }
+        if (preferred != null && canTryRemembered(remaining, networkUnchanged)) {
+            val rememberedProfile = requireNotNull(preferred.profile)
+            val rememberedConfig = JSONObject(configuration(base, rememberedProfile.applyTo(settings).copy(
+                customEndpoint = preferred.peer,
+                endpointMode = EndpointMode.CUSTOM_ONLY,
+                scanStrategy = ScanStrategy.TURBO,
+            ))).put("peerFallback", false).toString()
+            val rememberedEngine = withTimeoutOrNull(minOf(REMEMBERED_ENDPOINT_TIMEOUT_MS, remaining)) {
+                prepare(rememberedConfig).getOrNull()
+            }
+            if (rememberedEngine != null && networkUnchanged()) {
+                return Result.success(EndpointPreparation(rememberedConfig, rememberedEngine))
+            }
+        }
         val discovered = EndpointDiscovery(backend, networkUnchanged, nowMillis).discover(
-            settings, settings.transport, hints, budgetMillis = remaining, targetVerified = 1,
+            settings, settings.transport, hints.drop(if (preferred == null) 0 else 1), budgetMillis = remaining, targetVerified = 1,
             onUpdate = onUpdate,
         )
         if (!networkUnchanged() || discovered.stage != DiscoveryStage.COMPLETE) {
@@ -53,6 +71,9 @@ class AutomaticEndpointPreparation(
 
     companion object {
         const val CONNECT_RESERVE_MS = 10_000L
+        const val REMEMBERED_ENDPOINT_TIMEOUT_MS = 12_000L
+
+        private fun canTryRemembered(remaining: Long, networkUnchanged: () -> Boolean) = remaining > 1_000L && networkUnchanged()
 
         fun settings(base: String): AppSettings {
             val json = JSONObject(base)
@@ -64,7 +85,7 @@ class AutomaticEndpointPreparation(
             }
             return AppSettings(
                 transport = TunnelProtocol.entries.firstOrNull { it.wireName == json.optString("transport") } ?: TunnelProtocol.H2,
-                scanStrategy = ScanStrategy.entries.firstOrNull { it.wireName == json.optString("scanMode") } ?: ScanStrategy.BALANCED,
+                scanStrategy = ScanStrategy.entries.firstOrNull { it.wireName == json.optString("scanMode") } ?: ScanStrategy.TURBO,
                 dualStack = json.optString("ipScan", "both") !in listOf("v4", "4", "ipv4"),
                 noizeProfile = json.optString("noize", "firewall"),
                 fragmentTls = json.optBoolean("fragmentTls"),
@@ -122,7 +143,12 @@ suspend fun prepareEndpointEngine(context: Context, config: String, budgetMillis
             AutomaticEndpointPreparation(
                 backend = NativeEndpointDiscovery(context, sameNetwork) { AutomaticEndpointPreparation.configuration(config, it) },
                 provision = { withContext(Dispatchers.IO) { NativeAetherBridge.provision(it) }.map { } },
-                prepare = { withContext(Dispatchers.IO) { NativeAetherBridge.prepare(it) } },
+                prepare = { candidate ->
+                    withContext(Dispatchers.IO) { NativeAetherBridge.prepare(candidate) }.onSuccess { engine ->
+                        val candidateSettings = AutomaticEndpointPreparation.settings(candidate)
+                        memory.rememberConnected(network.key, candidateSettings, engine.peer)
+                    }
+                },
                 networkUnchanged = sameNetwork,
             ).run(config, budgetMillis, withContext(Dispatchers.IO) {
                 val pinned = JSONObject(config).optString("peer").takeIf { it.isNotBlank() }?.let {

@@ -461,8 +461,8 @@ private fun FamilyHeader(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Image(
-                painterResource(R.drawable.whiteaesther_logo), null,
-                Modifier.size(42.dp),
+                painterResource(R.drawable.connecso_logo), null,
+                Modifier.size(52.dp),
             )
             Text(
                 stringResource(R.string.app_name), style = AetherTheme.type.RowTitle,

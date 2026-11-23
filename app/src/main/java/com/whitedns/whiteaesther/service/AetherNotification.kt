@@ -106,7 +106,7 @@ object AetherNotification {
             setTextColor(R.id.notification_disconnect_label, textColor)
         }
         return NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_notification)
+            .setSmallIcon(R.drawable.connecso_notification_mark_large)
             .setColor(0xFF149BDD.toInt())
             .setContentTitle(state.country.ifBlank { state.title })
             .setContentText(state.message.takeIf { !state.connected })

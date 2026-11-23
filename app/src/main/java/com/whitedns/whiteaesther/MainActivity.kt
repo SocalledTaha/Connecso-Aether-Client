@@ -272,7 +272,7 @@ class MainActivity : ComponentActivity() {
                     com.whitedns.whiteaesther.service.AetherTileService::class.java,
                 ),
                 getString(R.string.app_name),
-                android.graphics.drawable.Icon.createWithResource(this, R.drawable.ic_notification),
+                android.graphics.drawable.Icon.createWithResource(this, R.drawable.connecso_notification_mark),
                 mainExecutor,
                 { result ->
                     if (
@@ -531,7 +531,7 @@ class MainActivity : ComponentActivity() {
      */
     private fun exportIdentity() {
         val payload = viewModel.exportIdentity() ?: return
-        val name = "whiteaesther-identity.toml"
+        val name = "connecso-aether-identity.toml"
         val intent = ActivityResultContracts.CreateDocument("application/toml")
             .createIntent(this, name)
         if (intent.resolveActivity(packageManager) == null) {

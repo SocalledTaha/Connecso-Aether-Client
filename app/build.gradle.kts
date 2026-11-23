@@ -23,7 +23,7 @@ val androidAbis = providers.gradleProperty("WHITEAESTHER_ABIS")
     .get()
 // Keep a local preview installable over the previous preview APK. Release
 // workflows still supply their monotonically increasing run-based code.
-val appVersionCode = providers.gradleProperty("WHITEAESTHER_VERSION_CODE").orElse("15").map { it.toInt() }
+val appVersionCode = providers.gradleProperty("WHITEAESTHER_VERSION_CODE").orElse("18").map { it.toInt() }
 
 /**
  * What the build calls itself when the release workflow has not said.

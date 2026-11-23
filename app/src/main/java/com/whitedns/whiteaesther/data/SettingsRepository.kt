@@ -15,7 +15,7 @@ import kotlinx.coroutines.flow.map
 
 private val Context.settingsDataStore by preferencesDataStore(
     name = "whiteaesther_settings",
-    produceMigrations = { listOf(AutomaticCarrierMigration) },
+    produceMigrations = { listOf(AutomaticCarrierMigration, DefaultConnectionMigration) },
 )
 
 /**
@@ -45,12 +45,31 @@ internal object AutomaticCarrierMigration : DataMigration<Preferences> {
     override suspend fun cleanUp() = Unit
 }
 
+/** Apply H2 + Turbo once to existing installs that still carry the old defaults. */
+internal object DefaultConnectionMigration : DataMigration<Preferences> {
+    override suspend fun shouldMigrate(currentData: Preferences): Boolean =
+        SettingsRepository.DEFAULT_CONNECTION_MIGRATION_DONE !in currentData
+
+    override suspend fun migrate(currentData: Preferences): Preferences =
+        currentData.toMutablePreferences().apply {
+            if (this[SettingsRepository.TRANSPORT] == null || this[SettingsRepository.TRANSPORT] == "AUTO") {
+                this[SettingsRepository.TRANSPORT] = "H2"
+            }
+            if (this[SettingsRepository.SCAN] == null || this[SettingsRepository.SCAN] == "BALANCED") {
+                this[SettingsRepository.SCAN] = "TURBO"
+            }
+            this[SettingsRepository.DEFAULT_CONNECTION_MIGRATION_DONE] = true
+        }
+
+    override suspend fun cleanUp() = Unit
+}
+
 class SettingsRepository(private val context: Context) {
     val settings: Flow<AppSettings> = context.settingsDataStore.data.map { preferences ->
         val carrier = enumValueOrDefault(preferences[CARRIER], Carrier.AETHER)
         val secondCarrier = preferences[SECOND_CARRIER]
             ?.let { name -> Carrier.entries.firstOrNull { it.name == name } }
-        val transport = enumValueOrDefault(preferences[TRANSPORT], TunnelProtocol.AUTO)
+        val transport = enumValueOrDefault(preferences[TRANSPORT], TunnelProtocol.H2)
         val endpointMode = enumValueOrDefault(preferences[ENDPOINT_MODE], EndpointMode.AUTOMATIC)
         AppSettings(
             // Android presents a full-device VPN only. Per-app scope belongs
@@ -80,7 +99,7 @@ class SettingsRepository(private val context: Context) {
             psiphonRegion = preferences[PSIPHON_REGION].orEmpty(),
             torBridge = enumValueOrDefault(preferences[TOR_BRIDGE], TorBridge.NONE),
             torBridges = preferences[TOR_BRIDGES].orEmpty(),
-            scanStrategy = enumValueOrDefault(preferences[SCAN], ScanStrategy.BALANCED),
+            scanStrategy = enumValueOrDefault(preferences[SCAN], ScanStrategy.TURBO),
             dualStack = preferences[DUAL_STACK] ?: true,
             validationEnabled = preferences[VALIDATION] ?: true,
             noizeProfile = preferences[NOIZE] ?: "firewall",
@@ -185,7 +204,7 @@ class SettingsRepository(private val context: Context) {
     internal companion object {
         private val MODE = stringPreferencesKey("mode")
         private val PROXY_PORT = intPreferencesKey("proxy_port")
-        private val TRANSPORT = stringPreferencesKey("transport")
+        val TRANSPORT = stringPreferencesKey("transport")
         private val CARRIER = stringPreferencesKey("carrier")
         private val SECOND_CARRIER = stringPreferencesKey("second_carrier")
 
@@ -234,6 +253,7 @@ class SettingsRepository(private val context: Context) {
         val TOR_BRIDGE = stringPreferencesKey("tor_bridge")
         val TOR_BRIDGES = stringPreferencesKey("tor_bridges")
         val SCAN = stringPreferencesKey("scan")
+        val DEFAULT_CONNECTION_MIGRATION_DONE = booleanPreferencesKey("default_connection_migration_done")
         val DUAL_STACK = booleanPreferencesKey("dual_stack")
         val VALIDATION = booleanPreferencesKey("validation")
         val NOIZE = stringPreferencesKey("noize")

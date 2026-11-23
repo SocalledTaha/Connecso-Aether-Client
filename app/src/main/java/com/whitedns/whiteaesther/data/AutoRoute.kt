@@ -500,8 +500,8 @@ object AutoPlanner {
     fun automaticBase(base: String): String = runCatching {
         val json = JSONObject(base)
         json.put("advancedDiscovery", true)
-        if (json.optString("scanMode", "balanced") !in AUTOMATIC_DEPTHS) {
-            json.put("scanMode", "balanced")
+        if (json.optString("scanMode", "turbo") !in AUTOMATIC_DEPTHS) {
+            json.put("scanMode", "turbo")
         }
         if (json.has("peer")) json.put("peerFallback", true)
         json.toString()
